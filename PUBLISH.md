@@ -1,7 +1,12 @@
 # How to publish this repository
 
-Written for **this machine**, which has **no `git` and no `gh` installed**. Two routes are given;
-Route A is the one I recommend.
+**Status: published** at <https://github.com/3chet/strata-gfx906-fieldnotes>.
+This file is kept as the runbook — what was done, and the six things that went wrong on the way,
+so the next push (or the next person) takes minutes instead of an evening.
+
+The original plan assumed no `git` and no `gh` on the machine. Both turned out to be true, and two
+routes are still documented below. What actually worked was a third one, in
+[`Route C`](#route-c--what-actually-worked-ssh-over-443--cached-token) — read that first.
 
 ---
 
@@ -33,6 +38,12 @@ which gives you `ID+username@users.noreply.github.com`. Set it before the first 
 ```powershell
 git config --global user.name  "your-handle"
 git config --global user.email "ID+your-handle@users.noreply.github.com"
+```
+
+You do not have to look the numeric ID up by hand — the public API returns it:
+
+```powershell
+(Invoke-RestMethod https://api.github.com/users/<your-handle> -Headers @{'User-Agent'='x'}).id
 ```
 
 ---
@@ -142,7 +153,148 @@ Caveats of Route B:
 
 ---
 
-## After publishing — checklist
+## Route C — what actually worked (SSH over 443 + cached token)
+
+No `gh`, no web clicks, no manual token creation. The whole publish was three steps.
+
+### C1. SSH over port 443, not 22
+
+Port 22 to `github.com` is unreliable on many networks (here it reset mid-handshake). GitHub
+serves SSH on **`ssh.github.com:443`** as well. Add a dedicated key and route it there:
+
+```powershell
+ssh-keygen -t ed25519 -f $env:USERPROFILE\.ssh\id_ed25519_github -N '""' -C "yourlabel"
+Get-Content $env:USERPROFILE\.ssh\id_ed25519_github.pub   # paste this into GitHub
+```
+
+Append to `~/.ssh/config` (create it if absent):
+
+```
+Host github.com
+    HostName ssh.github.com
+    Port 443
+    User git
+    IdentityFile ~/.ssh/id_ed25519_github
+    IdentitiesOnly yes
+    ServerAliveInterval 30
+```
+
+Then add the public key at <https://github.com/settings/ssh/new> and verify:
+
+```powershell
+ssh -T git@github.com
+# Hi <user>! You've successfully authenticated, but GitHub does not provide shell access.
+```
+
+The `-v` output should say `Connecting to ssh.github.com [<ip>] port 443` — if it says port 22,
+the config block did not take effect.
+
+### C2. Reuse the cached credential to create the repo
+
+`git-credential-manager` already had a token for github.com (from an earlier HTTPS login), so
+creating the repo needed no interaction. Ask it, then call the API — never print the value:
+
+```powershell
+$gcm  = "C:\Program Files\Git\mingw64\bin\git-credential-manager.exe"
+$resp = "protocol=https`nhost=github.com`n`n" | & $gcm get
+$tok  = ($resp -split "`r?`n" | Where-Object { $_ -match '^password=' }) -replace '^password=',''
+$h    = @{ Authorization = "token $tok"; 'User-Agent' = 'x' }
+
+# who am I, and what may I do
+(Invoke-RestMethod https://api.github.com/user -Headers $h).login
+(Invoke-WebRequest https://api.github.com/user -Headers $h).Headers['x-oauth-scopes']
+
+# create (once; a second call returns 422 "already exists")
+Invoke-RestMethod https://api.github.com/user/repos -Method Post -Headers $h `
+  -ContentType 'application/json' `
+  -Body '{"name":"strata-gfx906-fieldnotes","private":false,"auto_init":false}'
+```
+
+`auto_init` **must be false** — otherwise GitHub creates a README and your first push is rejected
+as a non-fast-forward.
+
+### C3. Push
+
+```powershell
+cd D:\github\strata-gfx906-fieldnotes
+git remote add origin git@github.com:<user>/strata-gfx906-fieldnotes.git
+git push -u origin main
+```
+
+### Metadata afterwards
+
+`PATCH /repos/{owner}/{repo}` for the description and `PUT /repos/{owner}/{repo}/topics` for
+topics both need the same token. **On this network those two calls hung indefinitely** while
+`GET` and `raw.githubusercontent.com` were fine. If that happens, set them in the web UI
+(repo → About → gear) and do not retry the API — for a one-off publish the UI is 20 seconds and
+the API is an evening.
+
+---
+
+## The six things that went wrong
+
+Kept because each cost real time, and five of them are not specific to this repo.
+
+**1. `winget install Git.Git` took 8 minutes.** GitHub-hosted downloads time out here.
+Measure before waiting: fetch 1 MB from each candidate and switch on the spot.
+`registry.npmmirror.com/-/binary/git-for-windows/` measured **1,717 KB/s** against 76–109 KB/s
+from the GitHub proxies, and **a flat timeout** from `github.com` itself.
+Rule: under ~200 KB/s or no progress in 30 s ⇒ change source, do not retry.
+
+**2. `github.com:443` looks down but is not.** `Test-NetConnection` succeeded three times in a
+row (1.6 s, then 0.1 s) while `git ls-remote` failed twice with `Failed to connect ... after
+21063 ms`. TCP connect and TLS/HTTP are interfered with differently. **Do not conclude "GitHub is
+blocked" from one probe** — and conversely, do not conclude it works from one either. The
+reliable transport here was SSH.
+
+**3. `GIT_SSH_COMMAND` with a quoted path breaks the spawn.** Setting it to
+`"C:\Program Files\Git\usr\bin\ssh.exe -o ..."` produced:
+
+```
+error: cannot spawn C:/Program : No such file or directory
+fatal: unable to fork
+```
+
+The space in `Program Files` is split by Git's own spawn. **Do not set `GIT_SSH_COMMAND` for
+this** — Git bundles its own `ssh` and reads `~/.ssh/config`, which is where the port-443 route
+belongs. (Setting `core.sshCommand` fails the same way.)
+
+**4. `gh` would not install, and was not needed.** `winget install GitHub.cli` ended with
+`InternetOpenUrl() failed 0x80072efd` — the same blocked download. Route C needs no `gh`.
+
+**5. Windows PowerShell 5.1 mangles UTF-8 in two different ways.**
+   - A script containing **Chinese text plus `$()` interpolation** is a parser error
+     (`表达式或语句中包含意外的标记`). Write the script **pure ASCII**.
+   - `Get-Content` decodes UTF-8-without-BOM as ANSI, so a correct file **displays** as mojibake
+     (`Host github.com` looked fine but its comment did not). The file is not damaged — verify with
+     `[IO.File]::ReadAllText($p,[Text.Encoding]::UTF8)` before "fixing" anything.
+   - Also: use `powershell`, not `pwsh`; `pwsh` is not installed here.
+
+**6. CRLF will break the shell scripts.** Git on Windows checks out CRLF by default, and a `.sh`
+with CRLF fails on Linux with a confusing `bad interpreter`. `.gitattributes` in this repo pins
+`*.sh text eol=lf`; keep it. Verify with:
+
+```powershell
+$b = [IO.File]::ReadAllBytes("scripts\measure_steady.sh")
+($b | Where-Object { $_ -eq 13 }).Count   # 0 expected (no CR bytes)
+```
+
+---
+
+## Day-to-day: pushing later changes
+
+SSH is configured, so no authentication is needed again:
+
+```powershell
+cd D:\github\strata-gfx906-fieldnotes
+git add -A
+git commit -m "describe the change"
+git push
+```
+
+Run `scripts\audit-redaction.ps1` before committing if the change touched host-specific text.
+
+
 
 ```
 [ ] audit-redaction.ps1 prints PASS

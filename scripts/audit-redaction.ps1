@@ -39,7 +39,8 @@ Write-Host ""
 # Things that are legitimate placeholders are whitelisted per line.
 # A line containing any of these is treated as an intentional placeholder.
 # users.noreply.github.com is GitHub's own privacy alias, not a real address.
-$placeholder = '<[A-Za-z0-9_\- ]+>|\$\{?[A-Z_][A-Z0-9_]*\}?|CHANGEME|REPLACE_ME|example\.(com|org|net)|noreply\.github\.com|@users\.noreply|127\.0\.0\.1|localhost|0\.0\.0\.0|YOUR_|your-|<model>|<host>|<container>|<unit>|<config>|<path>|<stamp>|<engine-pid>|<cfg>|<port>'
+# git@github.com / git@ssh.github.com are SSH usernames, not mailboxes.
+$placeholder = '<[A-Za-z0-9_\- ]+>|\$\{?[A-Z_][A-Z0-9_]*\}?|CHANGEME|REPLACE_ME|example\.(com|org|net)|noreply\.github\.com|@users\.noreply|git@github\.com|git@ssh\.github\.com|127\.0\.0\.1|localhost|0\.0\.0\.0|YOUR_|your-|<model>|<host>|<container>|<unit>|<config>|<path>|<stamp>|<engine-pid>|<cfg>|<port>|<user>|<owner>'
 
 $rules = @(
     @{ Name = 'private IPv4';      Sev = 'HIGH';
