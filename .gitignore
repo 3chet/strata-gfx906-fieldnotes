@@ -1,0 +1,34 @@
+# logs and engine state
+*.log
+*.gguf
+*.bin
+*.db
+*.safetensors
+
+# large or generated
+*.mp4
+*.webp
+*.png
+!docs/media/*.png
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# node
+node_modules/
+
+# editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# scratch
+*.tmp
+*.bak
+*.rb-*
+_bak*/
+_tmp*/

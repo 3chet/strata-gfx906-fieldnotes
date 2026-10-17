@@ -1,0 +1,19 @@
+# Normalise line endings explicitly.
+#
+# Without this, Git on Windows checks files out with CRLF, and a .sh script with
+# CRLF fails on Linux with a confusing "bad interpreter" error. Since this repo
+# ships shell scripts meant to run on a Linux box, everything text is forced LF.
+
+* text=auto eol=lf
+
+# Shell scripts must be LF, no exceptions.
+*.sh    text eol=lf
+*.ps1   text eol=crlf
+
+# Explicitly binary so Git never tries to convert them.
+*.png   binary
+*.jpg   binary
+*.webp  binary
+*.mp4   binary
+*.gguf  binary
+*.bin   binary
