@@ -107,8 +107,10 @@ const char* why = !o.serve                     ? "it needs --serve"
 if (why != nullptr) { fprintf(stderr, "... unavailable: %s\n", why); return 2; }
 ```
 
-This box violates **three**: 2-GPU layer split, `--batch 2`, and `short_read` at its default 64. Any one
-alone refuses startup.
+This box violates **two**: the 2-GPU layer split, and `short_read` at its default 64. (It used to
+violate three — `--batch 2` was the third, and it is gone now; see
+[07 §C5](07-corrections.md#c5-head-alias-has-two-disqualifiers-now).) Any one alone
+refuses startup, and `it supports one GPU only` is the message you will get.
 
 **(b) The premise does not transfer.** The upstream gain comes from an 8 GB card where the chunk was
 strangled to 256–768 tokens by VRAM pressure, so borrowing the head's memory made the chunk much bigger.
@@ -139,9 +141,11 @@ this one needs a real arm, and the physics says do not bother.
 
 ---
 
-## 6. `--prefill` chunk above 16384 — rejected on cost, and the "gain" was an artefact
+## 6. `--prefill` chunk above 16384 — rejected, and the first evidence for it was an artefact
 
-**A real trap.** Splitting the log by resolved chunk size looked like a clean natural experiment:
+**A real trap, in two layers.**
+
+Splitting the log by resolved chunk size looked like a clean natural experiment:
 
 | chunk | n | median prefill tok/s |
 |---|---:|---:|
@@ -166,13 +170,35 @@ And by prompt-length band it looked even better: 16K–32K showed **+17.2%**.
 2. **Time confound.** The 8192 epochs are 2026-10-13/14; the 16384 epochs are 2026-10-15 onward. Any
    per-epoch difference mixes chunk size with two days of build/profile/host changes.
 
-Cost side: `auto:N` is clamped to **32768 / 16384 / 8192**. This build is already at 16384; going up
-means double prompt buffers — the prompt path already borrows **6.38 GiB** of cache slots — to chase an
-effect that disappears under control. **Keep 16384.**
+**Then I repeated the same mistake in the other direction.** Having correctly thrown out the observational
+evidence, I wrote a *cost* argument ("double prompt buffers") that I had never measured. That argument is
+also wrong, and the real one is measurable. A controlled A/B on a fixed 32,209-token fixture, ring 384,
+n=7 per arm:
+
+| `--prefill` | **resolved** chunk | median | mean ± sd | span |
+|---|---:|---:|---:|---:|
+| `auto:16384` | 16384 | **689.1** | 685.0 ± 7.7 | 20.6 |
+| `auto:12288` | **8192** | 690.2 | 689.6 ± 6.5 | 19.3 |
+| `auto:32768` | **20992** | **521.4** | 510.8 ± 75.0 | **177.9** |
+
+`8192 vs 16384`: +0.7%, t = 1.21 — no difference. `20992 vs 16384`: **−25.4%, t = −6.11**, spread
+tripled. The cause is the ring's coverage boundary, not buffer memory: a 16384 chunk touches ≈384
+distinct experts per layer, which fills a 384-slot ring exactly; 20992 needs ≈491, so layers get moved
+twice ([08 §2](08-prefill-rings-and-chunks.md#2-the-chunk-and-the-ring-are-a-matched-pair)).
+
+And the ladder is not the one I wrote down:
+
+| you type | you get |
+|---|---:|
+| `auto:32768` | **20992** |
+| `auto:16384` | 16384 |
+| `auto:12288` | **8192** |
+
+**Keep `--prefill auto:16384`** — but because 16384 × 384 is a matched pair, not because of buffer cost.
 
 ---
 
-## 7. `--batch 3` — rejected (production never overlaps enough)
+## 7. `--batch` above 1 — rejected, including the 2 I was running
 
 `--batch` only helps while two requests are in flight. Before spending VRAM, measure the overlap.
 
@@ -193,6 +219,20 @@ net:                                          +0.69 GiB  →  −123 expert slot
 
 Each `--batch` slot is a **full session** (whole K/V + buffers), not a share of spare room. Batch 3 costs
 more than the 128K change frees.
+
+**The correction: this argument was always about `--batch 2` too.** A 1.4% and a 0.1% overlap rate is
+not a reason to keep a slot that costs 13–16% of the expert cache. I used the measurement only to reject
+the value I was not running. Deleting the flag entirely:
+
+| | `--batch 2` | `parallel: 1` |
+|---|---:|---:|
+| expert slots | 11,897 | **13,529–13,767** |
+| expert cache | 18.8 GiB | **21.2–21.6 GiB** |
+| decode, single request | within noise | within noise |
+| a second request at the same time | served together | **waits ~6.0 s** |
+
+That trade is right for one serial session and wrong for two. Measure, then choose — but the default on a
+single-session box is **1**, and it is the faster of the two.
 
 ---
 
@@ -216,21 +256,101 @@ pure strategy change — and upstream records it as `decoded 21% slower`. **Clos
 
 ---
 
+## 10. `--pipeline-windows 2` — rejected, and it had never actually run
+
+Full data in [`09 §1`](09-concurrency.md#1---pipeline-windows-2--rejected-and-the-flag-had-never-been-on).
+The two-line version:
+
+| arm | prefill 8.3K | spread | decode |
+|---|---:|---:|---:|
+| no pipeline | **491.7** | 1.4% | 42.0–44.3 |
+| pipeline 2 | **361.0** | **190%** | 42.8 |
+| pipeline 2 + draft moved to card 0 | 443.1 | 3.5% | 40.8 |
+
+**−26.6% prefill for a decode gain inside noise.** The upstream +21% is gfx12 data.
+
+And the part worth remembering: `--batch` was resetting `pipeline_windows` to 0 inside the engine, with
+**no log line on the auto path**. Every earlier "no effect" reading of this flag was measuring the
+default. See [02 §4.5](02-methodology.md#45-a-flag-you-set-can-be-reset-by-a-flag-you-did-not).
+
+## 11. `--kv-grow` — unavailable, and it is one line of source
+
+```cpp
+if (o.kv_grow) {                       // generate.cpp:4397
+    if (multi_gpu) { /* not supported */ }
+}
+```
+
+A layer split sets `multi_gpu`. Dead on this box, and no flag combination fixes it. **Do not investigate
+further.**
+
+## 12. `--calibrate` — it does not measure what you want
+
+The autotuner covers `pcie_frac`, `spec_min_p`, `pool_workers` and `adapt`. Three of those are already
+settled by direct A/B here, and the fourth (`adapt`) is not the bottleneck. It **does not touch the
+prefill pipe**, which is where the remaining headroom is.
+
+Worse, running it would *change* settings you have already decided, with its own noise floor. Treat
+`--calibrate` as a starting-point generator, not a judge.
+
+## 13. `STRATA_EMB_REUSE_ACCOUNT=1` — no mechanism on this config
+
+Upstream reports +3.9% on IQ3_XXS. Here it cannot produce any observable change, and that is checkable
+in source rather than measurable:
+
+```cpp
+// prefill.cpp:1904
+if (!emb_reuse_account()) f(T * N);      // the planner counts T*(D-HC)*4 bytes for the buffer
+```
+
+The flag tells the planner that one buffer is aliased, which frees room for **① a bigger chunk, ② more
+ring slots**. On this box:
+
+- ① is pinned by `--prefill auto:16384`, and the next rung up (20992) is the −25% arm;
+- ② is pinned by `STRATA_PREFILL_RING=384`, which sits *above* the byte-budget path in
+  `ring_slots()` — and 512 is measurably worse.
+
+Both outlets are closed. This is **"no mechanism", not "tried and failed"** — worth distinguishing,
+because a negative measurement would have implied the gain exists but is outweighed.
+
+## 14. `STRATA_PREFILL_CPU_SHARE` — only effective on small chunks
+
+It shifts expert-compute work to the CPU during prefill, which helps when the chunk is ≤3K tokens and the
+GPU is the bottleneck. At 16384 it does nothing measurable. If you are running a small chunk on a
+many-core CPU, revisit it; here it is closed.
+
+---
+
 ## Summary: what to keep
 
 If you are on gfx906 with a layer split, the configuration that survived all of this is:
 
 ```
 --expert-cache auto
---prefill auto:16384
---spec 4 --spec-min-p 0.7
---mtp <your mtp dir>          # suffix-draft stays at its default 3
---batch 2
---max-context 131072
+--prefill auto:16384              # do not move; 20992 resolves from 32768 and is −25%
+--spec 4 --spec-min-p 0.7         # effective verify width is 6; /metrics reports 6, argv says 4
+--mtp <your mtp dir>              # suffix-draft stays at its default 3
+                                  # NO --batch; set "parallel": 1 in the model JSON
+--max-context 163840              # with "fit_max_tokens": true
 --kv q4_0
 --layer-split auto
---pool-workers 5              # = the default resolution on 6 physical cores
+--pool-workers 5                  # = the default resolution on 6 physical cores
+--pcie-frac 0.3
+--vram-reserve-mib 1024           # engine's own safe floor is 512; 1536 is pure loss
+--adapt-every 4 --expert-profile-save-every 3
+
+env: STRATA_PREFILL_RING=384      # a layer split otherwise forces 96
 ```
 
-In other words: **the defaults were already right.** The value of the exercise is knowing *which* ones,
-and having the counter-evidence to stop yourself from "improving" them later.
+In other words: **the defaults were already right** — *except* for the ring, which a layer split quietly
+overrides. That is the one place where the default is not what a layer-split user gets. The value of the
+exercise is knowing *which* defaults, and having the counter-evidence to stop yourself from "improving"
+them later.
+
+Two things to check on your own box before copying this, because they are the two most expensive mistakes
+in the repository:
+
+1. **`"parallel"` in the JSON, not `--batch` in `argv`.** The flag is injected by the server; removing it
+   from the args array does nothing.
+2. **What your context limit is actually doing for you.** On a box without `--batch`, raising it does not
+   cost slots the way the old A/B suggested.

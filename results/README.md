@@ -7,10 +7,17 @@ All data was produced by the same harness: N arms in a palindromic order, each a
 process start, 5 discarded preconditioning requests per workload, then 8 measured samples.
 `temperature: 0` throughout.
 
-| file | experiment | arms |
+| file | experiment | arms / rows |
 |---|---|---|
-| `r17-lookup-chain-8arms.csv` | `--lookup-chain 3` vs default | 8 (A B B A A B B A) |
-| `r18-suffix-draft-mtp-q4-8arms.csv` | `--suffix-draft 0` × `--mtp-q4 all`, 2×2 factorial | 8 |
+| `r17-lookup-chain-8arms.csv` | `--lookup-chain 3` vs default | 8 arms (A B B A A B B A), 312 rows |
+| `r18-suffix-draft-mtp-q4-8arms.csv` | `--suffix-draft 0` × `--mtp-q4 all`, 2×2 factorial | 8 arms, 312 rows |
+| `r19-prefill-chunk-4arms.csv` | prefill chunk 16384 / 8192 / 20992 on a fixed 32,209-token prompt | 4 arms × 7, 28 rows |
+| `r20-prefix-reuse.csv` | reuse vs eviction on a 38,469-token conversation | 9 steps |
+| `r21-checkpoint-eviction.csv` | evictor size 1,986 / 15,366 / 38,305 / 68,895 tokens | 9 steps |
+| `r22-conversation-cache.csv` | `--conversation-cache-mib` 768 (fails) vs 1280 (works) | 2 budgets, 12 steps |
+
+**r17/r18 are decode experiments on 0.1.44.1 with `--batch 2`. r19–r22 are 0.1.45 with `parallel: 1`.**
+They do not share a baseline; do not merge them into one table.
 
 ## Columns
 
@@ -29,6 +36,19 @@ process start, 5 discarded preconditioning requests per workload, then 8 measure
 | `hit_pct` | **expert-cache hit rate for that request** — the plateau indicator |
 | `t_arm_start` | unix timestamp of the arm's first request; used for the drift term |
 | `txt_sha` / `txt_len` | r18 only: sha256 prefix and length of the reply |
+
+### Columns in r19–r22
+
+| column | meaning |
+|---|---|
+| `prefill_arg` | what was passed to `--prefill` |
+| `resolved_chunk` | **what the engine actually used** (printed in the startup banner) — this is the column to trust |
+| `process_age` | how long the engine process had been up; it changes the spread, not the median |
+| `read_ms` / `prefill_tps` | the fresh-read half of the request, from `/metrics` (`prompt_read / prompt_ms`) |
+| `hit_pct` | expert-cache hit rate for that request (0–1 in r19) |
+| `reused` / `read` | prompt tokens served from the prefix cache vs actually read. `read == prompt_tokens` means it was a real prefill sample |
+| `cc_parks` / `cc_restores` | conversation-cache parks and restores after that step |
+| `cc_bytes` | host RAM held by parked snapshots, in bytes |
 
 ## Two things to know before analysing these
 

@@ -10,7 +10,7 @@
 | RAM | 48 GB |
 | Storage | SSD; experts are `--mmap-experts`, read through the OS file cache |
 | OS | Ubuntu, kernel as shipped; ROCm from the community gfx906 build |
-| Runtime | Strata 0.1.44.1 inside Docker |
+| Runtime | Strata inside Docker — **0.1.45 today**; the r17/r18 A/B below ran on **0.1.44.1** |
 
 The engine's own startup line on the CPU is worth quoting because it constrains everything downstream:
 
@@ -28,17 +28,21 @@ headroom (see [04](04-what-not-to-tune.md#5---pool-workers--physically-no-headro
 |---|---|
 | Model | Qwen3.8-Flash-Next, **IQ3_XXS** (~47 GB across two GGUF shards) |
 | Experts | 24,576 profiled pairs |
-| MTP | yes, `--spec 4 --spec-min-p 0.7` |
-| Split | `--layer-split auto` → CUDA0 layers 0–16, CUDA1 layers 17–47 |
-| Batch | `--batch 2` (2 slot sessions, one per card) |
+| MTP | yes, `--spec 4 --spec-min-p 0.7` (the effective verify width is 6 — see [07 §G3](07-corrections.md#g3-metrics-spec-is-not-argv-spec)) |
+| Split | `--layer-split auto` → CUDA0 layers 0–15, CUDA1 layers 16–47 |
+| Batch | **none** — `"parallel": 1`. `--batch 2` was measured to cost 13–16% of the expert cache ([07 §C1](07-corrections.md#c1-delete-batch-2-do-not-keep-it)) |
 
 `--layer-split auto` runs a placement search over 46 candidates and prints its choice and predicted cost:
 
 ```
-strata generate: layer split auto: K=17 - predicted 58.5 ms per decode window;
-                 the caches hold 14092 of 24576 profiled pairs (~91.3% of the routed mass),
+strata generate: layer split auto: K=16 - predicted 57.0 ms per decode window;
+                 the caches hold 13952 of 24576 profiled pairs (~91.9% of the routed mass),
                  best of 46 placements
 ```
+
+(That block is the 0.1.45 line as it reads today. The 0.1.44.1 run quoted elsewhere in this repository
+said `K=17 / 58.5 ms / 14,092 / 91.3%`; the two are not comparable, which is why the version is on
+every table. Note the capital `K` here is the layer split point, not `--lookup-chain K`.)
 
 **That `K` is not stable across configurations.** It is a function of the expert profile's ranking and
 the free VRAM. See the warning in [02 §4.4](02-methodology.md#44-learned-state-is-an-input-on-the-next-boot).
@@ -79,6 +83,22 @@ By prompt length (zero-reuse only):
 Short prompts score *lower* — fixed per-request overhead amortised over less work. Long prompts are the
 honest prefill number.
 
+### Prefill on 0.1.45, fixed fixture (do not compare with the table above)
+
+The table above is 0.1.44.1 with a production prompt mix. These are 0.1.45 with one fixed 32,209-token
+fixture and a fresh nonce per request:
+
+| configuration | median tok/s | n |
+|---|---:|---:|
+| `auto:16384`, ring 384 (**current**) | **682.7** | 7 |
+| `auto:16384`, ring 96 (layer-split default) | 657.7 | 7 |
+| `auto:12288` → chunk 8192, ring 384 | 690.2 | 7 |
+| `auto:32768` → chunk 20992, ring 384 | 521.4 | 7 |
+
+A fixed fixture with a fixed prompt length is the only way to compare two prefill settings; the
+production table cannot do it, because its bucket composition moves with every change. See
+[08](08-prefill-rings-and-chunks.md) for the ring and the chunk-ladder measurements.
+
 > **Anti-pattern to avoid:** the engine prints `(N tok/s)` on its DONE line as
 > `fresh_tokens / read_ms`. A request that reused 99% of its prompt reads ~50 tokens and reports
 > ~37 tok/s. Averaging those in produces nonsense (42–49 tok/s across all production requests). I have
@@ -99,18 +119,24 @@ win is 4–6% of total.
 
 The engine prints its allocation at every start. Changing `--max-context` moves it exactly as predicted:
 
-| | 163840 | 131072 |
-|---|---:|---:|
-| CUDA0 slot session | 0.63 GiB | **0.42 GiB** |
-| CUDA1 slot session | 0.87 GiB | **0.80 GiB** |
-| CUDA0 expert slots | 6,801 | **7,297** |
-| CUDA1 expert slots | 5,019 | **5,080** |
-| **total slots** | 11,820 | **12,377** |
-| covered pairs / 24,576 | 13,900 (89.1%) | **14,092 (91.3%)** |
+| | 163840 / 0.1.44.1 | 131072 / 0.1.44.1 | **163840 / 0.1.45, no batch** |
+|---|---:|---:|---:|
+| CUDA0 slot session | 0.63 GiB | **0.42 GiB** | — |
+| CUDA1 slot session | 0.87 GiB | **0.80 GiB** | — |
+| CUDA0 expert slots | 6,801 | **7,297** | **7,836** |
+| CUDA1 expert slots | 5,019 | **5,080** | **5,931** |
+| **total slots** | 11,820 | **12,377** | **13,767** |
+| covered pairs / 24,576 | 13,900 (89.1%) | **14,092 (91.3%)** | **13,952 (91.9%)** |
+| K / predicted window | 20 / 68.4 ms | 17 / 58.5 ms | **16 / 57.0 ms** |
 
 Two runs at 131072 gave **identical** figures (12,347 in an earlier, differently-profiled run; the
 number is reproducible per configuration). Allocation is deterministic — if it moves between two runs of
 the same config, something else changed.
+
+> ⚠️ **The 131072 column is history, not a recommendation.** Deleting `--batch` bought more slots
+> (+1,947 at 163840) than lowering the context ever did (+557), so the trade no longer exists on this
+> box. Read [07 §C2](07-corrections.md#c2-revert-max-context-to-163840)
+> before acting on this table.
 
 ## What `--max-context` actually costs you
 
@@ -139,6 +165,25 @@ Observed response for a deliberately oversized prompt:
 So the risk of lowering `--max-context` is **availability for very long prompts**, not silent data loss.
 On this box the longest real prompt observed was **103,639 tokens** (production epochs only), leaving 21%
 headroom at 131072. Prompts above 131072 existed only in a benchmark epoch.
+
+### The escape hatch: `"fit_max_tokens": true`
+
+The error message itself tells you about it, and it is the reason the current box can keep a large
+context without turning long prompts into 400s:
+
+```json
+{ "fit_max_tokens": true }
+```
+
+With it set, the **server** shortens `max_tokens` to the room left instead of rejecting the request.
+Without it, a prompt that lands near the ceiling fails outright. Two consequences:
+
+- The context limit stops being an availability cliff and becomes a degradation — you get fewer output
+  tokens, not an error.
+- It does **not** let you exceed the context with the prompt itself. A 200K prompt against a 160K
+  context still fails; only the `max_tokens` part is negotiated.
+
+This box has it on, together with `--max-context 163840`.
 
 **Check your own distribution before copying this number:**
 

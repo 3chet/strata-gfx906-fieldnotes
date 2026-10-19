@@ -32,6 +32,19 @@ Two things to notice:
 Pre-condition before measuring. Five discarded requests per workload is enough on this box; check the
 hit-rate column to confirm you are actually on the plateau before trusting any sample.
 
+### Prefill has its own, shorter ramp — and it is mandatory
+
+Decode climbs for five requests; prefill only needs the **first** one thrown away, because the mechanism
+is different (page cache, expert profile, allocator) and it settles within one request. But throwing it
+away is not optional: in the arms measured for [08](08-prefill-rings-and-chunks.md) the first sample was
+consistently the worst of the seven, most visibly on the worst configuration (405 tok/s against a 521
+median on the 20992 arm).
+
+One trap makes this hard to notice. **Send the same prompt twice and the second one is not a prefill
+sample at all** — it reuses 38,464 of 38,469 tokens and measures 72 ms. The ramp you think you are
+watching is the prefix cache, not a warm-up. Every prefill sample needs a unique nonce at the front, and
+`reused == 0` should be asserted, not assumed ([08 §3](08-prefill-rings-and-chunks.md#3-how-to-measure-prefill-without-fooling-yourself)).
+
 ---
 
 ## 2. The second problem: the instrument may be blunter than the effect
@@ -62,6 +75,11 @@ weigh a 1% change. Saying "no effect" from that run would have been an accident,
 - **Two arms per configuration, identical config, on different restarts.** Their difference *is* your
   measured null. Do not estimate it from sample variance — sample variance will be too optimistic,
   because samples inside one arm are not independent.
+- **Equalise process age, and write it down.** A 40-hour process produced **2.7× the spread** of a fresh
+  one at byte-identical config — 685.6 vs 689.1 median (0.5% apart) but sd 20.6 vs 7.7, span 58.8 vs
+  20.6. Whatever causes it (profile drift, VRAM fragmentation), it moves the *variance*, so it inflates
+  your null without moving your effect. Restart before **both** arms, and record `uptime` with the arm
+  label ([07 §G1](07-corrections.md#g1-process-age-is-a-variance-input)).
 - **Interleave the arms in a palindrome** so drift cancels: `A B B A` for two configs,
   `A B B A A B B A` if you want the drift slope to be estimable.
 
@@ -155,6 +173,28 @@ A 15% swing in predicted decode cost, caused by a file you were not thinking abo
 before any VRAM-sensitive comparison**, and verify from the running process's own `cmdline`, not the
 config.
 
+### 4.5 A flag you set can be reset by a flag you did not
+
+`--pipeline-windows 2` was accepted by the CLI, reported as set, and then reset to 0 by the engine:
+
+```cpp
+if (o.batch != 0) {
+    o.pipeline_windows = 0;     // "not with --batch slots"
+    // on the auto path: no log line at all
+}
+```
+
+`--batch` was not even in `argv` — the server appended it from `"parallel": 2`. So the setting looked
+applied, never errored, and never ran. **Weeks of "this flag does nothing" were measuring the default.**
+
+Two habits prevent a repeat:
+
+- **Print the resolved value at startup and read it.** The engine already does this for the values that
+  matter (`prompt chunk auto: 16384 tokens, a 384-slot ring`, `layer split auto: K=16`). If your setting
+  does not appear in a banner, that is a finding, not a formality.
+- **Verify from `/proc/<pid>/cmdline` for things the server can inject**, because the config file does not
+  show what the server adds.
+
 ---
 
 ## 5. Checklist
@@ -163,11 +203,14 @@ config.
 [ ] pre-conditioned (>=5 discarded requests) *per workload*
 [ ] hit rate confirms the plateau before keeping any sample
 [ ] two arms per config, same md5, different restarts
+[ ] **arm uptime recorded, and equal across arms** (age inflates the null)
 [ ] palindromic arm order
 [ ] medians + MAD, not means
 [ ] drift fitted, not averaged
 [ ] resolution computed and stated
 [ ] judge validated on synthetic data with a known effect
+[ ] **prefill samples: unique nonce per request, `reused == 0` asserted**
+[ ] **resolved values read from the startup banner, not from argv**
 [ ] profile frozen; verified from /proc/<pid>/cmdline
 [ ] config md5 verified before and after
 [ ] "no difference" only reported with a number for "how small a difference I could have seen"

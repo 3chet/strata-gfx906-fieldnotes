@@ -236,3 +236,98 @@ Split by process lifetime, then by request shape.
 | prose | 0.265 | +2.03 | ±0.35 |
 
 Both recovered. Run this before trusting any fitting code.
+
+---
+
+## 10. Readings on 0.1.45 (2026-10-19)
+
+A separate engine build and a separate configuration (`parallel: 1`, no `--batch`). **Nothing in this
+section is comparable to §1–§8**, which are 0.1.44.1 with `--batch 2`. Raw samples:
+`results/r19`–`r22`.
+
+### 10.1 The prefill ring: 96 vs 384 (the one free win)
+
+32,209-token fixture, fresh nonce per request, n=7 per arm:
+
+| | ring 96 (layer-split default) | ring 384 | change |
+|---|---:|---:|---:|
+| prefill, 32K | 657.7 | **682.7** | **+3.8%** (median +4.4%) |
+| prefill, 68K | not archived | not archived | +3.0% (noise ±15%, direction only) |
+| decode | 42.4 | 42.15 → 42.6 | unchanged |
+| `expert_slots` | 13,767 | 13,767 | identical |
+| expert cache | 21,774 MiB | 21,774 MiB | identical |
+| `vram_free_mib` | 878 | 878 | identical |
+| borrowed prompt buffer | 6.38 GiB | 7.00 GiB | **during the request only** |
+
+n=7/7 on the 32K arm, t ≈ 4.0. Ring **512 is worse**: −1.8% versus 384.
+
+### 10.2 The chunk ladder (and why 20992 collapses)
+
+Same fixture, same ring 384, only `--prefill` changed:
+
+| arm | `--prefill` | **resolved** chunk | process age | median | mean ± sd | span |
+|---|---|---|---:|---:|---:|---:|
+| A1 | `auto:16384` | 16384 | 40 h | 685.6 | 677.9 ± 20.6 | 58.8 |
+| **A1b** | `auto:16384` | **16384** | fresh | **689.1** | 685.0 ± 7.7 | 20.6 |
+| A3 | `auto:12288` | **8192** | fresh | 690.2 | 689.6 ± 6.5 | 19.3 |
+| A2 | `auto:32768` | **20992** | fresh | **521.4** | 510.8 ± 75.0 | **177.9** |
+
+- `8192 vs 16384`: **+0.7%, t = 1.21** — not a difference.
+- `20992 vs 16384`: **−25.4%, t = −6.11, df 6.1** — and the spread tripled.
+
+A1 vs A1b is the same config on a 40 h process and a fresh one: **median 0.5% apart, sd 2.7× apart.**
+
+### 10.3 `--pipeline-windows 2`: three arms, all rejected
+
+8.3K prefill prompts, 256-token greedy decode, restart per arm:
+
+| arm | config | decode | prefill 8.3K | spread | slots |
+|---|---|---:|---:|---:|---:|
+| **A** | `parallel: 1`, no pipeline | 42.0–44.3 | **491.7** | 1.4% | **13,767** |
+| B | pipeline 2, draft on last card | 42.8 | **361.0** | 190% | 13,439 |
+| C | pipeline 2 + draft on first card + subset vocab | 40.8 | 443.1 | 3.5% | 12,983 |
+
+B is −26.6% prefill. C recovers prefill but loses decode (acceptance 63.8–73.9% vs A's 74–76%).
+Note that A's 13,767 exists only because `--batch` had to be removed to test the pipeline at all —
+that side effect was worth more than the feature.
+
+### 10.4 `parallel: 1` vs `parallel: 2`
+
+256-token greedy, 67-token prompt, restart per setting, steady medians:
+
+| | single | two at once | three at once | slots |
+|---|---:|---:|---:|---:|
+| `parallel: 1` | **44.3–44.7** | 43.0 (queued, second waits 6.0 s) | — | 13,529–13,767 |
+| `parallel: 2` | 40.9 (−8.3%) | **48.4 (+12.6%)** | 46.2 | 11,901 (−12%) |
+
+Prefill does not parallelise: two 8.7K prompts took 19.1 s + 19.4 s = **39.5 s** total, i.e. strictly
+serial.
+
+### 10.5 Prefix reuse and checkpoint eviction
+
+38,469-token conversation, `temperature: 0`:
+
+| state | `reused` | `read` | prompt | wall |
+|---|---:|---:|---:|---:|
+| create | 0 | 38,469 | 60.5 s | 60.9 s |
+| reuse × 4 | 38,464 | 5 | **72 ms** | **0.48–0.50 s** |
+| after 60 s idle | 38,464 | 5 | 72 ms | 0.48 s |
+| after a 1,986-token request | **0** | **38,469** | 55.0 s | 55.3 s |
+| after a 68,895-token request | **0** | 38,469 | 57.4 s | 57.8 s |
+
+**6 of 6 reuses landed in 0.48–0.50 s.** Evictor size does not matter: 1,986 tokens is sufficient.
+
+### 10.6 `--conversation-cache-mib`: 768 fails, 1280 works
+
+| budget | 38K snapshot | `parks` | `restores` | 38K conversation after an 888-token request |
+|---:|---|---:|---:|---:|
+| 768 | **783 MiB > budget → skipped** | 4 | **0** | 127.1 s (full re-read) |
+| 1280 | 784 MiB | 4 | **2** | **0.99 s** (restored 38,464 tok in 87–100 ms) |
+
+With the cache off, the equivalent measurement is §10.5: 55.0 s after a 1,986-token evictor. The
+127.1 s figure above is longer than that because it was taken under heavier memory pressure, not
+because the evictor was smaller — do not read the two as a size effect.
+
+Cost: first park 33.7 s, then 0.5–1.0 s per turn, 1.08 GiB resident for two parked sessions.
+After the 1.1 GB landed, the next two requests took 29.5 s and 109 s — a one-time reclaim storm, back
+to 5.0 s afterwards.

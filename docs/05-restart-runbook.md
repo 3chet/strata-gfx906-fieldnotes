@@ -20,7 +20,7 @@ RestartSec=15
 KillMode=control-group
 ```
 
-`ExecStop` kills **`server.py` only**. The engine (`build-714/strata --serve …`) is a **child process**
+`ExecStop` kills **`server.py` only**. The engine (`<engine binary> --serve …`) is a **child process**
 and can survive. A `docker exec` that is killed does not necessarily signal the process inside the
 container.
 
