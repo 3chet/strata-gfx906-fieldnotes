@@ -174,9 +174,12 @@ Ordered by cost, cheapest first:
 
 1. **Keep a single session under ~70K.** Everything above that is walking the line. When a session
    passes ~60K, compress or start fresh **before** it grows, not after it fails.
-2. **Turn on the conversation cache** ([10 §4](10-prefix-cache.md#4-turning-it-on-what-a-multiplexed-workload-measures)).
-   It does not touch the 5 s check, but it cuts the restore work that precedes the flush — 53 → 14 s
-   on a 23K session, and proportionally more on a 100K one.
+2. **Do not turn on the conversation cache to buy that time.** It looks like the fix — 53 → 14 s on a
+   23K resume ([10 §4](10-prefix-cache.md#4-the-measurement-that-argued-for-turning-it-on)) — but at
+   this length the snapshot is 2.24 GiB and parking it takes ~72 s, past the 60 s watchdog. Production
+   died in stage `parking`, not in `decode`
+   ([10 §5](10-prefix-cache.md#5-rolled-back-within-the-hour-a-92k-session-takes-72-s-to-park)). It is
+   off.
 3. **More RAM.** This is the one hardware fix that is specific to this failure rather than generic
    "stability": every expert page that stays resident is a page that is not a major fault. 42 GiB of
    experts in 47 GB of RAM is the whole problem, and 64 GB removes it.

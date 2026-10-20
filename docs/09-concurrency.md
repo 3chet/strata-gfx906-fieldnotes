@@ -155,17 +155,26 @@ lane's worth of throughput hiding in more memory.
 **Cheapest path:** the board (R5 2600) caps at **64 GB**. Four slots are already occupied, so
 "2×16 GB replacing the two 8 GB sticks" gets there without a CPU change; 128 GB would require one.
 
-### The conversation cache: already on, and the upgrade would only make it cheaper
+### The conversation cache: off — and this is the one row 64 GB would actually change
 
-`--conversation-cache-mib` was held back until the upgrade because 1.1–1.5 GB against a `free` of
-~350 MB caused a reclaim storm. That reasoning expired with the traffic shape: on a multiplexed client
-the flag is worth 73% of the resume time, so it is **on now, before the upgrade**, at 4096 MiB — see
-[10 §4](10-prefix-cache.md#4-turning-it-on-what-a-multiplexed-workload-measures).
+`--conversation-cache-mib` went on for about an hour on 10-20 and then came back off. On a multiplexed
+client it is worth 73% of the resume time at 23K
+([10 §4](10-prefix-cache.md#4-the-measurement-that-argued-for-turning-it-on)), but the sessions this box
+runs are 90K: the snapshot is 2.24 GiB, the write rate falls from 84 MB/s to 22 MB/s once it has to
+reclaim, and ~72 s exceeds the 60 s stall watchdog. Both engine deaths landed in stage `parking`
+([10 §5](10-prefix-cache.md#5-rolled-back-within-the-hour-a-92k-session-takes-72-s-to-park),
+`results/r26`).
 
-What 64 GB would still buy is the *margin*: today the pool coexists with 41 GB available and costs
-2.7% decode, but the 12–18 s starvation immediately after a park is a page-cache artefact that more
-RAM removes rather than shrinks.
+That park is not merely slow — it is the *cause* of the slow turn behind it. A 2.24 GiB snapshot plus
+2.9 GB of swap evicts the 42 GiB of mmap'd experts, and decode then re-reads them from storage. A 92K
+turn ran at **3.6 tok/s / 68.8% hit / 12,304 MB of reads** with the pool loaded, against **36.3 tok/s /
+95.2% / 364 MB** on the same box with clean RAM.
+
+This is the one line in the ledger where more RAM would change the **verdict** rather than the margin:
+at 47 GB the snapshot has nowhere to go but over the expert pages; at 64 GB it does.
 
 > **Pending:** the 64 GB measurement is not done. The decode and hit-rate halves of this section are
 > predictions from the ledger above, not results. When the RAM arrives, re-run the A/B in
-> [10 §4](10-prefix-cache.md#4-turning-it-on-what-a-multiplexed-workload-measures) before trusting them.
+> [10 §4](10-prefix-cache.md#4-the-measurement-that-argued-for-turning-it-on) and the 92K park in
+> [10 §5](10-prefix-cache.md#5-rolled-back-within-the-hour-a-92k-session-takes-72-s-to-park) before
+> trusting them.

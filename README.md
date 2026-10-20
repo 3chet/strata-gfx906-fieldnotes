@@ -30,7 +30,7 @@ nothing**. That ratio is the useful part.
 | `--prefill auto:16384` | ✅ **kept** | Matched with ring 384. 8192 ties it; **20992 is −25.4%** (t = −6.11) |
 | `--max-context 131072` | ⚠️ **reverted** | The same context now yields 13,767 slots vs 12,377 at 131072 — dropping `--batch` bought more than lowering the context |
 | `--pipeline-windows 2` | ❌ rejected | −26.6% prefill, spread ×135. And `--batch` had been silently disabling it |
-| **`--conversation-cache-mib 4096`** | ✅ **adopted** | A multiplexed client (4 prefixes) paid **53.4 s per resume**. Parking cut it to **14.4 s (−73%)** for 2.7% decode |
+| `--conversation-cache-mib` | ❌ **off** (tried 10-20, reverted) | **−73%** on a 23K resume, but a 92K session parks 2.24 GiB at **22 MB/s = 72 s**, past the 60 s watchdog. Both deaths were in stage `parking` |
 | `--lookup-chain 3` | ❌ rejected | Adds 3.5 draft tokens/request on prose; acceptance falls 82.1% → 79.6%; throughput +0.08 tok/s |
 | `--suffix-draft 0` | ❌ rejected | −6.7% on echo, 1.7× the noise floor. The default (3) is doing real work |
 | `--mtp-q4 all` | ❌ rejected | Draft layer **grows** 912 → 949 MiB. The Q4 copy is loaded *in addition*, not instead |
@@ -134,6 +134,7 @@ results/
   r23-conversation-cache-multiplexed.csv  12 rows · 4 arms · the same flag on a multiplexed client
   r24-kv-resident.csv                 2 rows · --kv-resident 40960: +3.9% slots, −6.9% decode
   r25-long-context-restore.csv        3 rows · the 104K request that died, and one that did not
+  r26-conversation-cache-rollback.csv 5 rows · why r23's flag came back off: 84 → 22 MB/s past ~600 MB
 ```
 
 ---

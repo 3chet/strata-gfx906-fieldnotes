@@ -18,9 +18,10 @@ evidence → what it changes.**
 | C4 | 🟠 medium | chunk > 16384 rejected on *buffer cost* | Rejected on a **measured −25.4%**; the cause is the ring's coverage boundary |
 | C5 | 🟡 low | `--prefill-head-alias` has 3 disqualifiers | **2** now — `--batch` is gone. Still refused |
 | C6 | 🔴 high | Numbers presented as current | All absolutes are **0.1.44.1**; the box now runs **0.1.45** |
-| C7 | 🔴 high | `--conversation-cache-mib` off — "production is one serial conversation" | **On, at 4096 MiB.** The client was multiplexed. Recovery 53.4 s → 14.4 s |
+| C7 | 🔴 high | `--conversation-cache-mib` off — "production is one serial conversation" | The client **was** multiplexed (that half holds). The flag went **on, then off again within the hour** |
 | C8 | 🟠 medium | The KV cache is ~3.87 GiB, so it is worth trading for slots | **≈0.47 GiB.** Measured. There is nothing to trade |
 | C9 | 🟠 medium | `reading the prompt: 103,976 of 103,983` means it read 103,976 tokens | That is the **already-reused** count; 7 tokens were read |
+| C10 | 🔴 high | A 23K A/B is enough to size the cache budget | **No.** 566 MiB parks in 6.7 s, 2.24 GiB takes 72 s. Snapshot cost is not linear |
 
 Plus four gaps that would mislead a careful reader: [§G1](#g1-process-age-is-a-variance-input)
 (process age), [§G2](#g2-cjk-prompt-tokens-per-character), [§G3](#g3-metrics-spec-is-not-argv-spec),
@@ -195,20 +196,22 @@ chasing any percentage in this repository.
 
 ---
 
-## C7. The conversation cache is on. "Serial client" was a misreading of the traffic
+## C7. "Serial client" was a misreading of the traffic — yet the flag still came back off
 
 **What I wrote.** In `docs/04` and `docs/10` §3: `--conversation-cache-mib` is genuinely effective but
 **stays off**, because eighteen consecutive production requests had monotonically increasing
 `in_tokens` (29,644 → … → 38,882) — "a serial single conversation appending to the same prefix every
 turn", where parking buys nothing and costs 0.5–1.0 s.
 
-**What is true.** It is on:
+**What is true.** The flag works — on a conversation of the size I tested:
 
 ```
 --conversation-cache-mib 4096
 --conversation-cache-min-tokens 20000
 --conversation-cache-park-gain 2000
 ```
+
+It went into production on that basis, and came back out an hour later (C10).
 
 One 23,407-token conversation, a ~70-token interrupter to destroy the checkpoint, the conversation
 again — four configurations, same script:
@@ -232,6 +235,12 @@ again — four configurations, same script:
 There is also a stale cost figure in the old note. "One or two requests took 29.5 s and 109 s" was
 measured when `free` was ~350 MB; at 41 GB available the same configuration costs **2.7% decode** and
 no reclaim storm. **A cost measured under memory pressure is not a property of the setting.**
+
+**Superseded the same day — by C10.** The traffic reading above is right: the client is multiplexed,
+and parking does cut a 23K resume from 53.4 s to 14.4 s. What it did not survive is the *size* of the
+sessions. On a 92K conversation the snapshot is 2.24 GiB, the write takes ~72 s, and the engine is
+killed by its own 60 s stall watchdog in stage `parking`. The flags were removed within the hour.
+C7 stands as the correction to "serial"; it is not a standing recommendation to enable the flag.
 
 **What it changes.** `docs/10` §3 is kept as history with a forward pointer; §4 carries the multiplexed
 measurement and the production config. The "off" verdict is withdrawn. The durable lesson is narrower
@@ -293,6 +302,47 @@ plausible. The check that would have caught it takes one call: `reused` and `pro
 **What it changes.** It moved the diagnosis from "prefill is slow" to "restore plus expert refill is
 slow", which is the correct one and points at a different fix. `docs/11` is built on it, and its first
 section exists specifically so this misreading does not happen twice.
+
+---
+
+## C10. A 23K A/B is not enough to size the conversation cache
+
+**What I wrote.** C7 above, and `docs/10` §4: the flag is worth 73% of a resume, so it belongs in
+production at 4096 MiB, described as "~2 snapshots of a 100K session at ~20.4 KB/token".
+
+**What is true.** 4096 MiB was the wrong unit of measure. The cost is not linear in snapshot size, and
+the 23K session I tested sits on the cheap side of a cliff:
+
+```
+parked 23417 tokens in  6755.4 ms; bytes=593525912     #  566 MiB @ 84 MB/s
+parked 78157 tokens in 61431.8 ms; bytes=1418474608    # 1.35 GiB @ 22 MB/s
+```
+
+Past roughly 600 MB the kernel starts evicting clean mmap'd pages to make room, so the write rate drops
+**4×** — and the pages being evicted are the 42 GiB of experts that decode then has to re-read from
+storage. The first production request after the change:
+
+```
+prompt 92628 tokens, 27 generated in 7423 ms (3.6 tok/s), hit rate 68.8%, 12,304 MB read (596,080 major faults)
+```
+
+against **36.3 tok/s / 95.2% / 364 MB** for a 78K prompt on the same box with clean RAM. Then two
+`exit code -6`, both in stage `parking`.
+
+**Two errors, not one.**
+
+1. **I tested the cheap case and generalised from it.** 23K is where this flag looks free. The sessions
+   this box actually runs are 60–100K, where the snapshot is 1.0–2.3 GiB.
+2. **I trusted a budget check to bound a cost it does not bound.** `conversations.make_room(estimate,
+   held)` and the resulting `skip parking (snapshot %zu MiB exceeds available budget)` in
+   `src/program/generate.cpp` are correct code. But capacity was never the constraint: cutting the
+   budget to 1536 MiB still admitted a 1,322 MiB snapshot, and that still took **61 s**. **The useful
+   and the fatal snapshot sizes overlap, so no budget value separates them.**
+
+**Corrected verdict.** Off, zero `conversation-cache` flags in `argv`. The flag is viable only where the
+snapshot stays under ~600 MB (≈24K tokens), or on a box with enough RAM that a 2.24 GiB write does not
+have to evict experts — 64 GB, which this box is not. Full measurements in `docs/10` §5, raw rows in
+`results/r26`.
 
 ---
 

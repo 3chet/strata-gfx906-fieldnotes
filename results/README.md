@@ -18,6 +18,7 @@ process start, 5 discarded preconditioning requests per workload, then 8 measure
 | `r23-conversation-cache-multiplexed.csv` | the same flag on a **multiplexed** workload: 4 arms, one 23,407-token session, a ~70-token interrupter between resumes | 4 arms × 3 steps, 12 rows |
 | `r24-kv-resident.csv` | `--kv-resident 40960` vs off: slot gain against decode cost | 2 rows |
 | `r25-long-context-restore.csv` | the 103,983-token request that died, and a 104K reproduction that did not | 3 rows |
+| `r26-conversation-cache-rollback.csv` | why r23's flag was removed an hour later: park rate falls 84 → 22 MB/s once the snapshot passes ~600 MB | 5 rows |
 
 **r17/r18 are decode experiments on 0.1.44.1 with `--batch 2`. r19–r22 are 0.1.45 with `parallel: 1`.**
 They do not share a baseline; do not merge them into one table.
@@ -53,14 +54,15 @@ They do not share a baseline; do not merge them into one table.
 | `cc_parks` / `cc_restores` | conversation-cache parks and restores after that step |
 | `cc_bytes` | host RAM held by parked snapshots, in bytes |
 
-### Columns in r23–r25 (reduced sets — read this before using them)
+### Columns in r23–r26 (reduced sets — read this before using them)
 
-These three files record only what the instrument actually reported; they are not re-derivable from a
+These files record only what the instrument actually reported; they are not re-derivable from a
 full harness run, and they deliberately contain **no column I did not measure**.
 
 | column | meaning |
 |---|---|
 | `cc_mib` / `cc_park_gain` / `cc_min_tokens` | the three conversation-cache flags for that arm. `0/0/0` = the flag is off |
+| `snapshot_mib` / `park_ms` / `park_mbs` | the parked snapshot's size, how long the write took, and the implied rate. In r26 a blank `park_ms` means **no park line was emitted** — the engine died first |
 | `interrupter_tokens` | size of the throwaway request inserted between resumes, to destroy the checkpoint |
 | `reused` | prompt tokens served from the prefix cache. **The column that decides everything** — `0` next to a non-zero `session_tokens` means the checkpoint was destroyed |
 | `restart` | which fresh-process arm the row belongs to. r24's two arms are on separate restarts |
@@ -79,6 +81,17 @@ Two cautions specific to these files:
   the log; `prompt_ms 18000` is "18 s so far" at the last progress line, and `decode_tps 0.0` is what
   the engine printed while stalled. It exists so the two failure modes can be compared against the
   successes, not as a throughput sample.
+- **r26 row `on-92k` has no `park_ms`, and its `snapshot_mib` is derived, not measured.** The engine was
+  killed during that park and never printed a size; 2,239 MiB comes from the 24.75 KB/token unit cost
+  measured on the two rows above it. Its `decode_tok_s` / `hit_rate` / `disk_read_mb` are real
+  `/metrics` values.
+- **The two big rows in r26 are not a one-variable A/B.** They differ in prompt length (92,628 vs
+  78,157) *and* in whether a 2.24 GiB snapshot was resident. The file records the magnitude of the
+  production failure; the causal claim about the pool rests on the park timings in the same file and on
+  both engines dying in stage `parking`, not on that pair alone.
+- **A park is charged to the *next* request.** In `on-78k` the 78K request itself was served normally
+  (113.7 s, 36.3 tok/s); the 61.4 s write then blocked the following 62-token request for 62.8 s.
+  Reading that row as "78K runs at 36 tok/s" is right; reading it as "the park is free" is not.
 
 ## Two things to know before analysing these
 

@@ -78,10 +78,12 @@ sent before, something evicted it.
 `--conversation-cache-mib` (default **0 = off**) parks a session's checkpoint in host RAM instead of
 destroying it, and restores it when that conversation comes back.
 
-> **This section is history. Read [§4](#4-turning-it-on-what-a-multiplexed-workload-measures) before
-> copying anything from it.** The "off" verdict below was correct for a client that runs one
-> conversation at a time. It did not survive a client that keeps three or four alive — on that
-> workload the flag is **on in production, and it cut recovery time by 73%**.
+> **This section is history. Read [§4](#4-the-measurement-that-argued-for-turning-it-on) and
+> [§5](#5-rolled-back-within-the-hour-a-92k-session-takes-72-s-to-park) before copying anything from
+> it.** The "off" verdict below was correct for a client that runs one conversation at a time. It did
+> not survive a client that keeps three or four alive: on that workload the flag went on, cut recovery
+> time by 73%, and was then **removed again within the hour** — because those conversations are 90K,
+> and a snapshot that size takes longer to park than the stall watchdog allows. **The flag is off.**
 
 ### 768 MiB is not enough — and the engine says why
 
@@ -164,13 +166,19 @@ One or two values ⇒ serial. Five or more, spread over the range ⇒ multiplexe
 ```
 
 Turn it on when **two conversations with different prefixes** alternate — two client sessions, a
-sub-agent with its own context, or an A/B harness running beside production. Then the 55 s → 0.5 s
-restore is worth 1.1 GB. **This is the case production turned out to be in** (§4), not the serial case
-§3 was written for.
+sub-agent with its own context, or an A/B harness running beside production. That was the case
+production turned out to be in (§4), not the serial case §3 was written for.
 
-After a 64 GB upgrade, turn it on by default (`-mib 1536`): the reclaim storm behind those 29/109 s
-samples is a memory-pressure artefact, and the pressure is what the upgrade removes. **This is a
-prediction, not a measurement — see [09 §3](09-concurrency.md#3-64-gb-what-it-buys-and-what-it-does-not).**
+> ⛔ **But only while the snapshot stays under ~600 MB (≈24K tokens).** Past that the write rate falls
+> from 84 MB/s to 22 MB/s, the write no longer fits inside the 60 s stall watchdog, and the pages it
+> evicts are the experts that decode is about to need. A 92K session takes **72 s** and kills the
+> engine — which is exactly what happened to this flag in production
+> ([§5](#5-rolled-back-within-the-hour-a-92k-session-takes-72-s-to-park)). The `-mib` budget cannot
+> express this limit, because the useful and the fatal snapshot sizes overlap.
+>
+> After a 64 GB upgrade the ratio changes and the flag may become viable again, but that is a
+> **prediction, not a measurement** — see
+> [09 §3](09-concurrency.md#3-64-gb-what-it-buys-and-what-it-does-not).
 
 ### One warning about the guard rail
 
@@ -181,7 +189,12 @@ on the min-free check to protect you.
 
 ---
 
-## 4. Turning it on: what a multiplexed workload measures
+## 4. The measurement that argued for turning it on
+
+> **Also history — read [§5](#5-rolled-back-within-the-hour-a-92k-session-takes-72-s-to-park).** The
+> A/B below is correct and is what put the flag into production. It tested a **23K** session, whose
+> snapshot is 566 MB and parks in 6.7 s. Production sessions were **92K**, whose snapshot is 2.24 GiB
+> and parks in ~72 s. The measurement was sound; the generalisation from it was not.
 
 §3 checked `in_tokens` and concluded "serial". It never counted prefixes. One hour of real traffic on
 the same box, grouped by reuse start point:
@@ -237,6 +250,10 @@ conversation cache: restored 16384 tokens (checkpoint) in 84.6 ms
 98,304 — **98%**, leaving ~1,700 tokens (≈3.5 s) to recompute. Short sessions lose most of the benefit,
 long ones lose almost none.
 
+> **But read §5 before acting on that.** It is arithmetic about the restore *ceiling*, and it assumes
+> the park completed. At 100K the park does not complete: the snapshot is 2.24 GiB and the write takes
+> ~72 s, past the watchdog. The sessions that would benefit most are the ones that cannot be parked.
+
 **Limit 2: an interrupter empties the pool, and it is not eviction.** The log sequence is
 `parked=1` → interrupter → `parked=0`, with `evictions = 0` throughout. Capacity was never the
 constraint (4,096 MiB holds roughly two 100K snapshots at ~20.4 KB/token). The pool is dropped when
@@ -275,7 +292,7 @@ repository.
 > reads 41 GB while `free` reads hundreds of MB, because mmap'd clean pages count as available, so the
 > guard never fires. Only the `-mib` budget bounds the pool. Size it deliberately.
 
-### The configuration in production
+### The configuration that ran — for about one hour
 
 ```
 --conversation-cache-mib 4096          # ~2 snapshots of a 100K session at ~20.4 KB/token
@@ -283,21 +300,126 @@ repository.
 --conversation-cache-park-gain 2000    # only re-snapshot after 2K of growth
 ```
 
-`min-tokens 20000` is the setting that makes this safe: without it, every 70-token request parks,
-walks the pool, and pays the 12–18 s starvation cost. It also means sessions below 20K get **no
-benefit** — which, given Limit 1, they were not going to get much of anyway.
-
-### What would make me turn it off again
-
-- A genuinely serial client. Run the `uniq -c` one-liner in §3 before believing this.
-- A box where `free` is under ~2 GB. The reclaim storm described in §3 is a memory-pressure artefact;
-  4 GB of pool on a 47 GB box with 41 GB available is not.
-- Any workload dominated by sessions under 20K. The restore ceiling makes them poor customers for a
-  slot.
+`min-tokens 20000` kept 70-token requests out of the pool, exactly as intended. It did nothing about
+the sessions that *are* 92K — which are the ones this box actually runs. See §5.
 
 ---
 
-## 5. Two measurement rules that came out of this
+## 5. Rolled back within the hour: a 92K session takes 72 s to park
+
+The first real request after §4 went live:
+
+```
+prompt 92628 tokens = 0 reused + 92628 read in 159516 ms (580.7 tok/s), 27 generated in 7423 ms (3.6 tok/s)
+decode expert cache hit rate: 68.8% (6317 hits / 9186 lookups)
+file tier I/O: the OS read 12304.4 MB from storage (596080 major faults) for 290866.2 MB of expert reads
+```
+
+**27 tokens generated in 7.4 s (3.6 tok/s), inside a request that took 6 min 15 s end to end**, against
+a 43.8 tok/s baseline. The 27 tokens are not a truncation — the turn ended naturally; the slowness is
+elsewhere. Then two engine suicides, eight minutes apart:
+
+```
+no progress for 60 s during a request (request: parking the previous conversation -1) - stopping the engine (issue #29)
+stall report: 0 layers served; expert pool 18/18 done; 5/5 workers sleeping; host idle 66 s
+```
+
+`exit code -6`. **The engine did not die while generating — it died while parking.** The stall stage
+is named `parking`, and `0 layers served` says the request never began: it was queued behind the
+previous conversation's snapshot write.
+
+### The decisive comparison
+
+Same box, same binary, two sessions 15K apart — pool holding a snapshot in one case, not in the other:
+
+| | prompt | prefill | decode | hit rate | disk read |
+|---|---:|---:|---:|---:|---:|
+| production, pool loaded | 92,628 | 159.5 s | **3.6 tok/s** | 68.8% | 12,304 MB |
+| same box, clean RAM | 78,157 | 113.7 s (687 tok/s) | **36.3 tok/s** | 95.2% | **364 MB** |
+
+The prompt lengths differ, so this is **not** a clean one-variable A/B and I am not going to present it
+as one. What it establishes is narrower and sufficient: a session of this size on this box is **not
+inherently** a 3.6 tok/s workload. The causal link to the pool rests on the mechanism — 68.8% hit and
+12.3 GB of re-reads against 95.2% and 364 MB — plus the fact that both deaths happened in stage
+`parking`. "Long context is slow" is the wrong reading. The chain, in three steps:
+
+1. A 92K prefill borrows **9,067 expert slots** (`5032 CUDA0 + 4035 CUDA1`) — 67% of the 13,523 total.
+   Returning them evicts the pages that decode is about to need.
+2. Decode re-reads experts from storage: 12.3 GB, 596,080 major faults.
+3. **Why those pages were not in RAM:** the parked snapshot (2.24 GiB) plus 2.9 GB of swap pushed the
+   42 GiB of mmap'd experts out of page cache. The pool is not merely slow to write — it is what makes
+   the *next* request slow to run.
+
+Then it closes into a loop: park 2.24 GiB → stall past 60 s → watchdog kills the engine → pool cleared
+→ next turn `reused 0` and a full re-read → 9,067 slots borrowed again → 3.6 tok/s → park again.
+
+### The number that matters: 24.75 KB per token, and 22 MB/s
+
+Two parks on this box, one just below the cliff and one past it:
+
+```
+parked 23417 tokens in  6755.4 ms; bytes=593525912     #  566 MiB @ 84 MB/s — free pages available
+parked 78157 tokens in 61431.8 ms; bytes=1418474608    # 1.35 GiB @ 22 MB/s — now reclaiming
+```
+
+The unit cost is stable at **24.75 KB/token**; the *rate* is not. Below roughly 600 MB the write runs at
+84 MB/s and leaves the expert pages alone. Above it, throughput falls to **22 MB/s**, because the kernel
+is now evicting clean mmap'd pages to make room. At 22 MB/s a 92,628-token session (2,239 MiB, from the
+same unit cost) needs **≈72 s** — longer than the 60 s stall watchdog, so the engine cannot survive it.
+
+And the park is not free even when it succeeds: it is a **pre-request action for the next request**. A
+`1+1` prompt that normally returns in 0.87 s was blocked for **62.8 s** behind the snapshot write.
+
+### Corrected rule
+
+> **The safety of this flag is a ratio — snapshot size ÷ free RAM — not a token count.**
+
+| session | snapshot | park | verdict |
+|---:|---:|---:|---|
+| 23,417 | 566 MiB | 6.7 s @ 84 MB/s | works; −73% resume |
+| 78,157 | 1.35 GiB | **61.4 s @ 22 MB/s** | already fatal — the watchdog is 60 s |
+| 92,628 | 2.24 GiB | **≈72 s** (derived) | fatal |
+
+So the flag is safe only where the snapshot stays under **~600 MB, i.e. roughly 24K tokens**. Above
+that it is both slower to write and more expensive to run afterwards, and the crossover is sharp rather
+than gradual — which is why a 23K test could not see it.
+
+### The `-mib` budget is a real guard, but not the guard you need
+
+The engine does refuse oversized snapshots. `src/program/generate.cpp` has
+
+```
+conversation cache: skip parking (snapshot %zu MiB exceeds available budget)
+```
+
+gated on `conversations.make_room(estimate, held)`. The check is correct; the calibration is not.
+Dropping the budget to 1536 MiB still admitted a 78K snapshot at 1,322 MiB — comfortably under budget
+and still 61 s to write. **Any budget large enough to let a working session park is already large
+enough to kill the engine**, because the useful size and the fatal size overlap. That is why the
+answer is "off", not "re-tuned".
+
+### Verdict: off
+
+Rolled back to zero `conversation-cache` flags. Verified after restart:
+
+| measurement | pool loaded | rolled back |
+|---|---:|---:|
+| 92K session, decode | **3.6 tok/s** (hit 68.8%, 12,304 MB read) | not re-measured |
+| 256-token prose bench, decode | 42.6 tok/s (23K-config test) | **41.8 tok/s** |
+| stall charged to the following request | **62.8 s** | none observed |
+| `expert_slots` | 13,523 | **13,523** — unchanged |
+
+Two honest limits on that table: the 92K session was **not** re-run after the rollback — what was
+verified is that the pool is gone (`conversation_cache_mib = 0`), the slots are intact, and a clean
+256-token bench returns 41.8 tok/s at 0.99 hit. And the two decode rows are different workloads, so the
+columns are not meant to be subtracted.
+
+The slot count deserves its own line: **parking never bought VRAM.** The pool lives in host RAM, and
+RAM pressure was the scarce resource to begin with.
+
+---
+
+## 6. Four measurement rules that came out of this
 
 1. **Separate `reused` from `read` before calling anything "jitter".** A reuse is 72 ms; a cold read is
    55 s at 38K. If you mix them you will "discover" a 1000× variance that does not exist.
@@ -309,3 +431,12 @@ A third rule got added when §4 was written:
 3. **A verdict about a cache is a verdict about a *workload*, and workloads change.** "Serial, so parks
    are wasted" was true on 10-18 and false on 10-20 with the same binary and the same config. Record
    the traffic shape next to the verdict, or the verdict silently expires.
+
+A fourth when §5 was written:
+
+4. **Measure the cost at the size you will actually run.** The 23K A/B was executed correctly and still
+   produced the wrong decision, because 23K parked in 6.7 s and production parked in 72 s. Write cost
+   stops being linear in snapshot size the moment the kernel starts reclaiming to make room — and the
+   session length that makes the *benefit* largest (Limit 1: the restore ceiling is fixed, so a longer
+   session recovers a larger fraction) is the same one that makes the *cost* fatal. A benchmark that
+   only exercises the cheap case cannot fail, and a result that cannot fail is not a result.

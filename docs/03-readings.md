@@ -335,6 +335,9 @@ to 5.0 s afterwards.
 **On a multiplexed workload this table understates the gain and overstates the cost.** With four
 interleaved conversations the same flag took resume time from 53.4 s to 14.4 s on a 23K session, for
 2.7% of decode and no reclaim storm at 41 GB available — see
-[10 §4](10-prefix-cache.md#4-turning-it-on-what-a-multiplexed-workload-measures) and
-`results/r23`. Note also that the 127.1 s row above is a *memory-pressure* measurement, not a clean
-one: two numbers from two different memory states are not two arms.
+[10 §4](10-prefix-cache.md#4-the-measurement-that-argued-for-turning-it-on) and `results/r23`.
+**That reading was then invalidated at production session size:** a 92K session parks 2.24 GiB at
+22 MB/s ≈ 72 s, and the engine is killed by its own 60 s stall watchdog in stage `parking`
+([10 §5](10-prefix-cache.md#5-rolled-back-within-the-hour-a-92k-session-takes-72-s-to-park),
+`results/r26`). The flag is off. Note also that the 127.1 s row above is a *memory-pressure*
+measurement, not a clean one: two numbers from two different memory states are not two arms.

@@ -1,0 +1,6 @@
+﻿arm,session_tokens,snapshot_mib,park_ms,park_mbs,reused,prefill_ms,decode_tok_s,hit_rate,disk_read_mb,note
+on-23k,23417,566,6755,84,0,0,,,,"first park, 593525912 bytes; free pages available"
+on-23k,23417,,314,,16384,,,,,"later park 314 ms; resume entered at the 16384 checkpoint"
+on-78k,78157,1322,61432,22,0,113700,36.3,0.952,364,"the 78K request was served before the park; the 62-token request behind the park was blocked 62.8 s"
+on-92k,92628,2239,,,0,159516,3.6,0.688,12304,"production; engine died in stage parking, no park line emitted; size derived at 24.75 KB/token, not measured"
+off-bench,64,0,0,,0,,41.8,0.99,,"256-token prose, median of last 3, after rollback"
