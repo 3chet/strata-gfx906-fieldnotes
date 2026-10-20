@@ -32,7 +32,7 @@
 | `--prefill auto:16384` | ✅ **保留** | 与 ring 384 配对。8192 与它打平；**20992 掉 25.4%**（t = −6.11） |
 | `--max-context 131072` | ⚠️ **已回退** | 同一个 ctx 现在给 13,767 槽，131072 只有 12,377——删 batch 赚得比降 ctx 多 |
 | `--pipeline-windows 2` | ❌ 否决 | prefill **−26.6%**，抖动放大 135 倍。而且 `--batch` 一直在静默关掉它 |
-| `--conversation-cache-mib` | ⏸ **有效，但先别开** | 跨会话 55 s → 0.5 s；串行单会话每轮白付 0.5~1 s。有两路会话时才开 |
+| **`--conversation-cache-mib 4096`** | ✅ **采纳** | 多会话客户端（4 个前缀）每次恢复要 **53.4 s**，停泊后 **14.4 s（−73%）**，代价 2.7% decode |
 | `--lookup-chain 3` | ❌ 否决 | prose 上每请求多提 3.5 个草稿，接受率 82.1% → 79.6%，吞吐只 +0.08 tok/s |
 | `--suffix-draft 0` | ❌ 否决 | echo 上 −6.7%，是噪声底的 1.7 倍。**默认值 3 在做正功** |
 | `--mtp-q4 all` | ❌ 否决 | draft 层显存 **912 → 949 MiB 反向增加**。Q4 是额外加载，不是替换 |
@@ -40,18 +40,19 @@
 | `--pool-workers` | 🚫 无余量 | 6 物理核，5 worker + host 已全部占满 |
 | `--batch 3` | ❌ 否决 | 峰值并发只有 2；提到 3 占 0.69 GiB、少 123 个槽 |
 | `--kv-grow` | 🚫 不可用 | 源码要求 `!multi_gpu`（`generate.cpp:4397`），双卡出局 |
+| `--kv-resident 40960` | ❌ 否决 | **+3.9% 槽换 −6.9% 解码**。顺带证明 KV 只有 **≈0.47 GiB**，不是我估的 3.87 GiB |
 | `--expert-cache-per-layer` | 🚫 已结案 | 本机已是 PROFILE 常驻、命中 98~99%；且它按 `slots = q·48` 改总量，不是干净的 A/B |
 | `--calibrate` | 🚫 不适用 | 只标定 `pcie_frac`/`spec_min_p`/`pool_workers`/`adapt` 四项，都已定档，且不碰 prefill 管线 |
 | `STRATA_EMB_REUSE_ACCOUNT=1` | 🚫 无机制 | 它仅有的两个出口都被本配置钉死（`--prefill auto:16384` 与 env ring） |
 | rocBLAS 补表 | ❌ 否决 | `default` 行是标定器的判决，不是待补的空行 |
 
 完整证据见 [`docs/04-what-not-to-tune.md`](docs/04-what-not-to-tune.md)。
-两条正收益各有专文：[`docs/08`](docs/08-prefill-rings-and-chunks.md)（ring）与
-[`docs/09`](docs/09-concurrency.md)（并发）。
+三条正收益各有专文：[`docs/08`](docs/08-prefill-rings-and-chunks.md)（ring）、
+[`docs/09`](docs/09-concurrency.md)（并发）与 [`docs/10`](docs/10-prefix-cache.md)（会话缓存）。
 
 ---
 
-## 已更正的结论（2026-10-19 复测）
+## 已更正的结论（2026-10-20 复测）
 
 这一节是这次更新的重点。旧的结论不是"有争议"，是**错了**，逐条列出：
 
@@ -63,6 +64,9 @@
 | C4 | 否决更大 chunk 是因为"要双倍 prompt 缓冲" | 是实测 **−25.4%**；机制是 ring 的**覆盖边界** | 把观测数据的 Simpson 悖论正确否掉了，却换上一个没测过的成本论据 |
 | C5 | `--prefill-head-alias` 有 3 条违例 | 现在是 **2 条**（batch 已删），仍然拒绝 | 沿用旧配置计数 |
 | C6 | 绝对值当成"当前值" | 全是 **0.1.44.1** 的数，机器已是 **0.1.45** | 升级引擎后没给数字打版本标签 |
+| C7 | `--conversation-cache-mib` **保持关闭**，理由是"生产是串行单会话" | **已开启（4096 MiB）**：恢复 53.4 s → **14.4 s（−73%）** | 把"`in_tokens` 只增"当成"只有一个会话"。多会话交错时，每个前缀自己也是单调增的——我按时间排序得出"串行"，从没按前缀分组 |
+| C8 | KV 约 **3.87 GiB**，值得拿去换专家槽 | 实测 **≈0.47 GiB**（`40960 of 163840 cells → 0.35 GiB`） | 拿 528 B/cell × 层数 × 格数硬推，高估 **8 倍**；唯一能让引擎报出真值的开关当时在否决清单里，于是没跑 |
+| C9 | `reading the prompt: 103,976 of 103,983` 意为读了 103,976 个 token（≈3,800 tok/s） | 那个数是**已复用**数，实际只读 **7** 个；真实 103K 全量 prefill 是 **194 s、535 tok/s** | 把进度显示当测量读数，和 G3 同一类错。查一眼 `/metrics` 的 `reused` / `prompt_read` 就能否掉 |
 
 另外四个**没写但会误导**的坑：
 
@@ -134,6 +138,7 @@ docs/
   08-prefill-rings-and-chunks.md  ★ layer split 后 ring 只剩 96；384 是白拿的 +3.8%
   09-concurrency.md             pipeline 窗口、`parallel: 1` 与 `2`、64 GB 到底买什么
   10-prefix-cache.md            复用要么 0.5 s 要么 55 s，从来没有"有时慢"
+  11-long-context-and-verify-timeout.md  ★ 10 万 token 会话为什么死，以及那句会骗人的日志
 scripts/
   measure_steady.sh             decode：预热 + 采样，用命中率验证是否真到平台
   measure_prefill.py            prefill：每请求换 nonce、强制 `reused == 0`、数据取自 /metrics
@@ -146,6 +151,9 @@ results/
   r20-prefix-reuse.csv                9 行 · 复用 0.48 s，被冲掉 55 s
   r21-checkpoint-eviction.csv         9 行 · 任何别的 prompt 都会丢弃 checkpoint
   r22-conversation-cache.csv          12 行 · 预算 768（失败）vs 1280（成功）
+  r23-conversation-cache-multiplexed.csv  12 行 · 4 臂 · 同一个开关在多会话客户端上的表现
+  r24-kv-resident.csv                 2 行 · --kv-resident 40960：+3.9% 槽，−6.9% 解码
+  r25-long-context-restore.csv        3 行 · 死在 104K 的那条请求，以及一条没死的
 ```
 
 ---
@@ -168,6 +176,12 @@ results/
 - **layer split 会静默把 prefill ring 压成 96**，一个环境变量就能恢复（docs/08）。
 - **前缀缓存是全有或全无**——1,986 token 的小请求和 68K 的大请求一样，都会把 38K 的 checkpoint 清掉（docs/10）。
 - **你的压测 prompt 本身就是那个"插进来的别的 prompt"**，会清掉生产会话的缓存。
+- **`reading the prompt: N of M` 里的 N 是"已复用"，不是"已读取"**——103,976 of 103,983 意为只读了
+  **7** 个 token。日志是进度显示，`/metrics` 才是测量（docs/11）。
+- **`verify: timed out` 背后那个 5 秒硬编码，关掉比留着更糟**：该修的是 GPU 为什么慢，不是检查
+  （docs/11）。
+- **缓存的裁决是对"工作负载"的裁决，而负载会变**——"串行客户端，停泊白费"周一成立、周三就不成立，
+  同一个二进制、同一份配置（docs/07 §C7）。裁决旁边必须写上当时的流量形状。
 - 重启陷阱：`ExecStop` 可能杀不掉引擎子进程（docs/05）。
 - 显存是**异步回收**的——进程退出后要轮询等它真正落地。
 - **一个开关可以被静默覆盖**——`--pipeline-windows` 被 `--batch` 置回 0，auto 路径连日志都不打。看横幅，别信你传的参数。

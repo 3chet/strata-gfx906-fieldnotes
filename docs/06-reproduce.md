@@ -146,6 +146,21 @@ than an outage. Without it, every request that lands near the ceiling is a hard 
 that has already dropped `--batch`, the number is already ≥13.5K and the old +557-slot argument is noise
 against it ([07 §C2](07-corrections.md#c2-revert-max-context-to-163840)).
 
+**Before that, check how big the KV actually is** — there may be nothing to buy. `--max-context` is
+allocated in full at startup, but on this box the whole reservation was **≈0.47 GiB** at `--kv q4_0`,
+against a 21 GiB expert cache. The cheap way to get your own number is to run the engine **once** with
+`--kv-resident` and read the startup line:
+
+```bash
+grep -a 'KV streaming' engine.log
+# KV streaming: 40960 of 163840 cells per QSA layer in VRAM, the K/V in 0.35 GiB of pinned RAM
+```
+
+0.35 GiB for 40,960 of 163,840 cells ⇒ ~0.47 GiB for the full context. Then decide — and note this flag
+is **not** a keeper: it costs 6.9% decode for 3.9% slots ([04 §15](04-what-not-to-tune.md#15---kv-resident--rejected-measured-at-a-net-loss)).
+It is worth one restart as a measuring instrument, not as a setting. My first estimate here was 8× too
+high ([11 §4](11-long-context-and-verify-timeout.md#4-the-kv-cache-is-047-gib-not-387-gib--and-lowering---max-context-buys-nothing)).
+
 ---
 
 ## 5. Apply a config change without taking the service down

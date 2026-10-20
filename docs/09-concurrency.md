@@ -155,12 +155,17 @@ lane's worth of throughput hiding in more memory.
 **Cheapest path:** the board (R5 2600) caps at **64 GB**. Four slots are already occupied, so
 "2×16 GB replacing the two 8 GB sticks" gets there without a CPU change; 128 GB would require one.
 
-### When to turn the conversation cache back on
+### The conversation cache: already on, and the upgrade would only make it cheaper
 
-`--conversation-cache-mib` is the one setting that becomes cheap after the upgrade — see
-[10 §3](10-prefix-cache.md#3-the-fix-and-why-it-is-off-today). At 64 GB the 1.1–1.5 GB it holds is no
-longer squeezing the page cache, and the 33.7 s first park will not trigger a reclaim stall behind it.
+`--conversation-cache-mib` was held back until the upgrade because 1.1–1.5 GB against a `free` of
+~350 MB caused a reclaim storm. That reasoning expired with the traffic shape: on a multiplexed client
+the flag is worth 73% of the resume time, so it is **on now, before the upgrade**, at 4096 MiB — see
+[10 §4](10-prefix-cache.md#4-turning-it-on-what-a-multiplexed-workload-measures).
 
-> **Pending:** the 64 GB measurement is not done. This section is a prediction from the ledger above,
-> not a result. When the RAM arrives, re-run [10 §3](10-prefix-cache.md#3-the-fix-and-why-it-is-off-today)
-> and the crash count before trusting it.
+What 64 GB would still buy is the *margin*: today the pool coexists with 41 GB available and costs
+2.7% decode, but the 12–18 s starvation immediately after a park is a page-cache artefact that more
+RAM removes rather than shrinks.
+
+> **Pending:** the 64 GB measurement is not done. The decode and hit-rate halves of this section are
+> predictions from the ledger above, not results. When the RAM arrives, re-run the A/B in
+> [10 §4](10-prefix-cache.md#4-turning-it-on-what-a-multiplexed-workload-measures) before trusting them.

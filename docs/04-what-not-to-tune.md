@@ -321,6 +321,40 @@ many-core CPU, revisit it; here it is closed.
 
 ---
 
+## 15. `--kv-resident` — rejected, measured at a net loss
+
+`--kv-resident N` keeps the most recent `N` cells of KV per QSA layer in VRAM and streams the rest
+from pinned host RAM, which frees VRAM for expert slots. The idea is sound and it is the only option
+here that buys slots **without** shortening `--max-context`. It still loses.
+
+N = 40960, one arm each, fresh restart per arm:
+
+| | off | `--kv-resident 40960` |
+|---|---:|---:|
+| CUDA0 expert slots | 7,836 | **8,023** |
+| CUDA1 expert slots | 5,931 | **6,276** |
+| **total slots** | 13,767 | **14,299 (+3.9%)** |
+| KV held in pinned RAM | — | 0.35 GiB |
+| block reads served from VRAM | — | 97.61% of 3,180 |
+| **decode, n=3 median** | **43.8 tok/s** | **40.8 tok/s (−6.9%)** |
+| expert-cache hit rate | 0.99 | 0.99 |
+
+**Verdict: +3.9% slots for −6.9% decode. Rejected, rolled back.**
+
+The hit rate is the tell. It did not move, so this is not an expert-locality effect — the loss is
+charged by the KV streaming itself. And note the awkward part: **97.61% of block reads already hit
+VRAM** and it *still* costs 7%. What you pay for is the 2.4% that miss, once per layer per token, along
+a path whose narrowest link is x4 (see [07 §G3](07-corrections.md#g3-metrics-spec-is-not-argv-spec) on
+why the metrics report 4 while sysfs reports 16 — both are correct).
+
+**The one thing worth keeping from this experiment** is that it is the only way to make the engine
+state the KV's true size on the record. It did, and the number was 8× smaller than my estimate:
+0.35 GiB for 40,960 of 163,840 cells ⇒ **≈0.47 GiB total**. That kills the whole "trade KV VRAM for
+expert slots" line of thinking, including lowering `--max-context` — see
+[11 §4](11-long-context-and-verify-timeout.md#4-the-kv-cache-is-047-gib-not-387-gib--and-lowering---max-context-buys-nothing).
+
+---
+
 ## Summary: what to keep
 
 If you are on gfx906 with a layer split, the configuration that survived all of this is:

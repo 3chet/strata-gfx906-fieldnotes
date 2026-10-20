@@ -1,0 +1,3 @@
+﻿config,restart,cuda0_slots,cuda1_slots,total_slots,kv_pinned_gib,block_reads_vram_pct,decode_median_tps,n_decode,hit_rate
+off,1,7836,5931,13767,0.00,,43.8,3,0.99
+kv-resident-40960,2,8023,6276,14299,0.35,97.61,40.8,3,0.99

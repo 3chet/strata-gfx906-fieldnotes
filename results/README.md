@@ -15,6 +15,9 @@ process start, 5 discarded preconditioning requests per workload, then 8 measure
 | `r20-prefix-reuse.csv` | reuse vs eviction on a 38,469-token conversation | 9 steps |
 | `r21-checkpoint-eviction.csv` | evictor size 1,986 / 15,366 / 38,305 / 68,895 tokens | 9 steps |
 | `r22-conversation-cache.csv` | `--conversation-cache-mib` 768 (fails) vs 1280 (works) | 2 budgets, 12 steps |
+| `r23-conversation-cache-multiplexed.csv` | the same flag on a **multiplexed** workload: 4 arms, one 23,407-token session, a ~70-token interrupter between resumes | 4 arms × 3 steps, 12 rows |
+| `r24-kv-resident.csv` | `--kv-resident 40960` vs off: slot gain against decode cost | 2 rows |
+| `r25-long-context-restore.csv` | the 103,983-token request that died, and a 104K reproduction that did not | 3 rows |
 
 **r17/r18 are decode experiments on 0.1.44.1 with `--batch 2`. r19–r22 are 0.1.45 with `parallel: 1`.**
 They do not share a baseline; do not merge them into one table.
@@ -49,6 +52,33 @@ They do not share a baseline; do not merge them into one table.
 | `reused` / `read` | prompt tokens served from the prefix cache vs actually read. `read == prompt_tokens` means it was a real prefill sample |
 | `cc_parks` / `cc_restores` | conversation-cache parks and restores after that step |
 | `cc_bytes` | host RAM held by parked snapshots, in bytes |
+
+### Columns in r23–r25 (reduced sets — read this before using them)
+
+These three files record only what the instrument actually reported; they are not re-derivable from a
+full harness run, and they deliberately contain **no column I did not measure**.
+
+| column | meaning |
+|---|---|
+| `cc_mib` / `cc_park_gain` / `cc_min_tokens` | the three conversation-cache flags for that arm. `0/0/0` = the flag is off |
+| `interrupter_tokens` | size of the throwaway request inserted between resumes, to destroy the checkpoint |
+| `reused` | prompt tokens served from the prefix cache. **The column that decides everything** — `0` next to a non-zero `session_tokens` means the checkpoint was destroyed |
+| `restart` | which fresh-process arm the row belongs to. r24's two arms are on separate restarts |
+| `kv_pinned_gib` | K/V moved to pinned host RAM, as the engine printed it at startup |
+| `block_reads_vram_pct` | share of KV block reads served from VRAM rather than host RAM (r24) |
+| `decode_median_tps` | decode median; `n_decode` says how many samples it is the median of |
+| `prompt_ms` / `read` | the restore-or-prefill half. `read == prompt_tokens` ⇒ real prefill; anything else ⇒ restore |
+| `outcome` / `source` | `source = engine-log` rows are quoted from the log and are approximate; `source = metrics` rows come from `/metrics` |
+
+Two cautions specific to these files:
+
+- **r24's `off` arm reads 13,767 total slots, and production later read 13,522.** Same config, different
+  restart: `K` and the learned expert profile move the allocation between boots (see
+  `../docs/07 §G1`). Compare an arm only against an arm from the same restart.
+- **r25 row `r1` is not a measurement of a completed request.** It is the failing request, quoted from
+  the log; `prompt_ms 18000` is "18 s so far" at the last progress line, and `decode_tps 0.0` is what
+  the engine printed while stalled. It exists so the two failure modes can be compared against the
+  successes, not as a throughput sample.
 
 ## Two things to know before analysing these
 

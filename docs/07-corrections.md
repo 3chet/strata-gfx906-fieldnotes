@@ -18,6 +18,9 @@ evidence → what it changes.**
 | C4 | 🟠 medium | chunk > 16384 rejected on *buffer cost* | Rejected on a **measured −25.4%**; the cause is the ring's coverage boundary |
 | C5 | 🟡 low | `--prefill-head-alias` has 3 disqualifiers | **2** now — `--batch` is gone. Still refused |
 | C6 | 🔴 high | Numbers presented as current | All absolutes are **0.1.44.1**; the box now runs **0.1.45** |
+| C7 | 🔴 high | `--conversation-cache-mib` off — "production is one serial conversation" | **On, at 4096 MiB.** The client was multiplexed. Recovery 53.4 s → 14.4 s |
+| C8 | 🟠 medium | The KV cache is ~3.87 GiB, so it is worth trading for slots | **≈0.47 GiB.** Measured. There is nothing to trade |
+| C9 | 🟠 medium | `reading the prompt: 103,976 of 103,983` means it read 103,976 tokens | That is the **already-reused** count; 7 tokens were read |
 
 Plus four gaps that would mislead a careful reader: [§G1](#g1-process-age-is-a-variance-input)
 (process age), [§G2](#g2-cjk-prompt-tokens-per-character), [§G3](#g3-metrics-spec-is-not-argv-spec),
@@ -189,6 +192,107 @@ but a 20 → 16 swing between builds is larger than the noise I attributed to it
 **What it changes.** Treat the ✓/✗ verdicts as durable (they are about mechanisms) and the tok/s numbers
 as build-specific (they are about this binary). If you are on 0.1.45, re-measure your own null before
 chasing any percentage in this repository.
+
+---
+
+## C7. The conversation cache is on. "Serial client" was a misreading of the traffic
+
+**What I wrote.** In `docs/04` and `docs/10` §3: `--conversation-cache-mib` is genuinely effective but
+**stays off**, because eighteen consecutive production requests had monotonically increasing
+`in_tokens` (29,644 → … → 38,882) — "a serial single conversation appending to the same prefix every
+turn", where parking buys nothing and costs 0.5–1.0 s.
+
+**What is true.** It is on:
+
+```
+--conversation-cache-mib 4096
+--conversation-cache-min-tokens 20000
+--conversation-cache-park-gain 2000
+```
+
+One 23,407-token conversation, a ~70-token interrupter to destroy the checkpoint, the conversation
+again — four configurations, same script:
+
+| step | cache off | 3072 / gain 2000 | 4096 / gain 0 | **4096 / gain 2000** |
+|---|---:|---:|---:|---:|
+| create | 39.5 s | 46.6 s | 38.0 s | 37.9 s |
+| **resume after interrupter** | **53.4 s, `reused 0`** | 14.5 s | 14.7 s | **14.4 s** |
+| **resume again** | **38.4 s, `reused 0`** | 14.9 s | 14.2 s | **15.3 s** |
+
+**Why the error happened — two stacked mistakes.**
+
+1. **"`in_tokens` only grows" does not mean "only one conversation exists."** A client with four
+   conversations interleaved produces exactly the same monotonic sequence within each prefix. I sorted
+   by time and concluded serial; I never grouped by prefix.
+2. **The sample was one app, not the box.** The eighteen requests came from a single client. An hour
+   of the box's real traffic had at least four prefixes: `reused = 86,897` recurring five times and
+   `101,368` once, with the same 86K conversation resuming in **30.6 / 39.2 / 44.8 / 50.6 / 68.0 s**
+   purely depending on which other session had spoken in between.
+
+There is also a stale cost figure in the old note. "One or two requests took 29.5 s and 109 s" was
+measured when `free` was ~350 MB; at 41 GB available the same configuration costs **2.7% decode** and
+no reclaim storm. **A cost measured under memory pressure is not a property of the setting.**
+
+**What it changes.** `docs/10` §3 is kept as history with a forward pointer; §4 carries the multiplexed
+measurement and the production config. The "off" verdict is withdrawn. The durable lesson is narrower
+than the flag: *a verdict about a cache is a verdict about a workload* — write the traffic shape next to
+the verdict or it expires silently.
+
+---
+
+## C8. The KV cache is 0.47 GiB, not 3.87 GiB
+
+**What I wrote.** "48 layers × 163,840 cells × 528 B/cell ≈ **3.87 GiB**, so lowering
+`--max-context` buys ~475 / 949 / 1,431 slots at 131072 / 98304 / 65536."
+
+**What is true.** Measured, from the engine's own startup line:
+
+```
+KV streaming: 40960 of 163840 cells per QSA layer in VRAM, the K/V in 0.35 GiB of pinned RAM
+```
+
+0.35 GiB for 40,960 of 163,840 cells ⇒ **≈0.47 GiB** for the whole reservation. **8× less than I
+claimed.**
+
+**Why the error happened.** I multiplied a per-cell byte figure by cells and by layers as if it scaled
+that way across a layer split, and I never checked it against anything the engine printed. The one flag
+that makes the engine state the number out loud — `--kv-resident` — was already on my rejected list, so
+I never ran the experiment that would have corrected me.
+
+**What it changes.** The "trade context for slots" table is dead as a live option: 163840 → 98304 frees
+≈0.15 GiB, which is a few dozen slots, in exchange for rejecting every 100K session. The conclusion
+in `docs/04`/`docs/06` ("do not lower the context") **survives, but the arithmetic behind it was wrong
+by 8× and the stated reason was wrong** — the truth is not "you would gain slots you no longer need",
+it is "there is almost nothing there to gain". See
+[11 §4](11-long-context-and-verify-timeout.md#4-the-kv-cache-is-047-gib-not-387-gib--and-lowering---max-context-buys-nothing).
+
+---
+
+## C9. `reading the prompt: N of M` — N is reused, not read
+
+**What I wrote.** "The prompt line shows 103,976 of 103,983 tokens processed in 18 s — that is
+~3,800 tok/s, so a 104K prefill is fast on this box."
+
+**What is true.** The counter counts tokens **served from the prefix cache** against the total. On that
+request **7 tokens were read.** And a real 104K prefill, measured with a nonce so nothing could be
+reused:
+
+| | prompt tokens | reused | read | prompt time | rate |
+|---|---:|---:|---:|---:|---:|
+| cold | 104,548 | 0 | **104,548** | **194.4 s** | **535 tok/s** |
+| resume | 104,551 | 98,304 | 6,247 | 18.7 s | — |
+
+So the log line's apparent 3,800 tok/s and the engine's actual 535 tok/s differ by 7×, and the 18 s was
+a **KV restore**, not a prefill.
+
+**Why the error happened.** Same family as [G3](#g3-metrics-spec-is-not-argv-spec): I read a progress
+display as a measurement. The line even has the shape of an I/O counter, which is what made it
+plausible. The check that would have caught it takes one call: `reused` and `prompt_read` in
+`/metrics`.
+
+**What it changes.** It moved the diagnosis from "prefill is slow" to "restore plus expert refill is
+slow", which is the correct one and points at a different fix. `docs/11` is built on it, and its first
+section exists specifically so this misreading does not happen twice.
 
 ---
 

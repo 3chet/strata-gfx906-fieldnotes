@@ -1,0 +1,4 @@
+﻿id,label,prompt_tokens,reused,read,prompt_ms,decode_tps,hit_rate,outcome,source
+r1,production-crash-2026-10-19,103983,103976,7,18000,0.0,0.0,crashed-verify-layer-32,engine-log
+r2,A-cold,104548,0,104548,194436,29.4,0.914,survived,metrics
+r3,B-resume,104551,98304,6247,18731,33.7,0.955,survived,metrics

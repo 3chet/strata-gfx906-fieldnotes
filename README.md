@@ -30,7 +30,7 @@ nothing**. That ratio is the useful part.
 | `--prefill auto:16384` | ✅ **kept** | Matched with ring 384. 8192 ties it; **20992 is −25.4%** (t = −6.11) |
 | `--max-context 131072` | ⚠️ **reverted** | The same context now yields 13,767 slots vs 12,377 at 131072 — dropping `--batch` bought more than lowering the context |
 | `--pipeline-windows 2` | ❌ rejected | −26.6% prefill, spread ×135. And `--batch` had been silently disabling it |
-| `--conversation-cache-mib` | ⏸ **off, but works** | 55 s → 0.5 s across conversations; costs 0.5–1 s/turn in a serial one. Turn on when you have two |
+| **`--conversation-cache-mib 4096`** | ✅ **adopted** | A multiplexed client (4 prefixes) paid **53.4 s per resume**. Parking cut it to **14.4 s (−73%)** for 2.7% decode |
 | `--lookup-chain 3` | ❌ rejected | Adds 3.5 draft tokens/request on prose; acceptance falls 82.1% → 79.6%; throughput +0.08 tok/s |
 | `--suffix-draft 0` | ❌ rejected | −6.7% on echo, 1.7× the noise floor. The default (3) is doing real work |
 | `--mtp-q4 all` | ❌ rejected | Draft layer **grows** 912 → 949 MiB. The Q4 copy is loaded *in addition*, not instead |
@@ -38,15 +38,17 @@ nothing**. That ratio is the useful part.
 | `--pool-workers` | 🚫 no headroom | 6 physical cores, 5 workers + host already use all of them |
 | `--batch 3` | ❌ rejected | Peak concurrency is 2; 3 costs 0.69 GiB and 123 slots |
 | `--kv-grow` | 🚫 unavailable | Requires `!multi_gpu` (`generate.cpp:4397`) — a layer split disqualifies it |
+| `--kv-resident 40960` | ❌ rejected | **+3.9% slots for −6.9% decode**. It also proved the KV is only ~0.47 GiB, not the 3.87 GiB I had estimated |
 | `--expert-cache-per-layer` | 🚫 closed | This box is already PROFILE-resident at 98–99% hit; the flag sizes `slots = q·48`, so it is not a clean A/B |
 | `--calibrate` | 🚫 not applicable | It tunes `pcie_frac` / `spec_min_p` / `pool_workers` / `adapt` — all four are already settled, and it does not touch the prefill pipe |
 | `STRATA_EMB_REUSE_ACCOUNT=1` | 🚫 no mechanism | Both of its outlets are pinned by this config (`--prefill auto:16384` and the env ring) |
 | `rocBLAS` table filling | ❌ rejected | `default` rows are the calibrator's verdict, not blanks |
 
 Full evidence for each: [`docs/04-what-not-to-tune.md`](docs/04-what-not-to-tune.md).
-The two positive results have their own files:
-[`docs/08`](docs/08-prefill-rings-and-chunks.md) (the ring) and
-[`docs/09`](docs/09-concurrency.md) (concurrency).
+The three positive results have their own files:
+[`docs/08`](docs/08-prefill-rings-and-chunks.md) (the ring),
+[`docs/09`](docs/09-concurrency.md) (concurrency) and
+[`docs/10`](docs/10-prefix-cache.md) (the conversation cache).
 
 ---
 
@@ -116,6 +118,7 @@ docs/
   08-prefill-rings-and-chunks.md  ★ the ring is 96 after a layer split; 384 is the free +3.8%
   09-concurrency.md             pipeline windows, `parallel: 1` vs `2`, and what 64 GB buys
   10-prefix-cache.md            reuse is 0.5 s or 55 s, never "sometimes slow"
+  11-long-context-and-verify-timeout.md  ★ why a 100K session dies, and the log line that misleads
 scripts/
   measure_steady.sh             decode: pre-condition + measure, with the hit-rate plateau check
   measure_prefill.py            prefill: nonce per request, `reused == 0` enforced, reads /metrics
@@ -128,6 +131,9 @@ results/
   r20-prefix-reuse.csv                9 rows · reuse is 0.48 s, eviction is 55 s
   r21-checkpoint-eviction.csv         9 rows · any other prompt discards the checkpoint
   r22-conversation-cache.csv          12 rows · budget 768 (fails) vs 1280 (works)
+  r23-conversation-cache-multiplexed.csv  12 rows · 4 arms · the same flag on a multiplexed client
+  r24-kv-resident.csv                 2 rows · --kv-resident 40960: +3.9% slots, −6.9% decode
+  r25-long-context-restore.csv        3 rows · the 104K request that died, and one that did not
 ```
 
 ---
@@ -154,6 +160,13 @@ results/
   completely as a 68K one (`docs/10`).
 - **Your benchmark prompt is an evictor** — do not measure against a live service and then log the
   next production request as production latency.
+- **`reading the prompt: N of M` counts reused tokens, not read ones.** 103,976 of 103,983 meant
+  **7** tokens were read. The log is a progress display; `/metrics` is the measurement (`docs/11`).
+- **The 5-second GPU wait behind `verify: timed out` is hard-coded, and disabling it is worse.** Fix
+  why the GPU is slow, not the check (`docs/11`).
+- **A verdict about a cache is a verdict about a workload, and workloads change.** "Serial client, so
+  parking is wasted" was true on Monday and false on Wednesday, same binary, same config. Write the
+  traffic shape next to the verdict (`docs/07 §C7`).
 - The restart hazard: `ExecStop` may not kill the engine child (docs/05).
 - GPU memory is reclaimed **asynchronously** after the process exits — poll for it.
 - **A flag can be silently overridden** — `--pipeline-windows` was reset to 0 by `--batch` with no

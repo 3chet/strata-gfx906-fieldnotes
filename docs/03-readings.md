@@ -239,11 +239,11 @@ Both recovered. Run this before trusting any fitting code.
 
 ---
 
-## 10. Readings on 0.1.45 (2026-10-19)
+## 10. Readings on 0.1.45 (2026-10-19 and 10-20)
 
 A separate engine build and a separate configuration (`parallel: 1`, no `--batch`). **Nothing in this
 section is comparable to §1–§8**, which are 0.1.44.1 with `--batch 2`. Raw samples:
-`results/r19`–`r22`.
+`results/r19`–`r25`.
 
 ### 10.1 The prefill ring: 96 vs 384 (the one free win)
 
@@ -331,3 +331,10 @@ because the evictor was smaller — do not read the two as a size effect.
 Cost: first park 33.7 s, then 0.5–1.0 s per turn, 1.08 GiB resident for two parked sessions.
 After the 1.1 GB landed, the next two requests took 29.5 s and 109 s — a one-time reclaim storm, back
 to 5.0 s afterwards.
+
+**On a multiplexed workload this table understates the gain and overstates the cost.** With four
+interleaved conversations the same flag took resume time from 53.4 s to 14.4 s on a 23K session, for
+2.7% of decode and no reclaim storm at 41 GB available — see
+[10 §4](10-prefix-cache.md#4-turning-it-on-what-a-multiplexed-workload-measures) and
+`results/r23`. Note also that the 127.1 s row above is a *memory-pressure* measurement, not a clean
+one: two numbers from two different memory states are not two arms.
