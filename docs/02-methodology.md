@@ -214,4 +214,12 @@ Two habits prevent a repeat:
 [ ] profile frozen; verified from /proc/<pid>/cmdline
 [ ] config md5 verified before and after
 [ ] "no difference" only reported with a number for "how small a difference I could have seen"
+[ ] **production-speed claims come from a same-prefix multi-turn probe, never from case rotation**
 ```
+
+The last line was added on 2026-10-23, after four days of reporting `decode ≈ 38 tok/s` from a
+harness that rotates six unrelated prompts. That number is a cold-prefix floor: 0% reuse, 0.88 hit,
+a full prefill per round. The same engine on a real conversation does **44–48**. The rotation harness
+is still the right instrument for *comparing* arms — both arms are equally cold — but it must never
+be quoted as production throughput. See [`12-multiturn-probe.md`](12-multiturn-probe.md), and use
+[`../scripts/multiturn_probe.py`](../scripts/multiturn_probe.py).

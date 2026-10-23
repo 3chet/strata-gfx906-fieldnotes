@@ -1,0 +1,11 @@
+﻿arm,config_delta,decode_p50,prefill_32k_tps,accept,slots,verdict
+s0-baseline,ctx=204800 prefill=auto:8192 ring=768,38.85,598.7,0.8524,11049,baseline
+s1-final,ctx=163840 prefill=auto:16384 ring=384,39.25,648.4,0.8450,11240,adopted
+s3-ref,same as s1-final (rerun),38.00,654.0,0.8486,11240,stable
+s2-A,STRATA_IO_PREFETCH=0,38.20,,0.8375,11207,control
+s2-B,STRATA_IO_PREFETCH=1,37.90,,0.8293,11207,rejected
+s3-pipe2,--prefill-pipe 2,38.55,78.6,0.8425,11207,rejected
+s3-halias,--prefill-head-alias,,,--,,engine_did_not_start_in_17.7_min
+s5-p05,--spec-min-p 0.5,37.90,,0.7198,11207,rejected
+s4-mtpq4,--mtp-q4 proj,37.20,,0.8067,11189,rejected
+prod-final,production state after the campaign,37.75,655.0,0.8191,11240,shipped

@@ -22,10 +22,17 @@ evidence → what it changes.**
 | C8 | 🟠 medium | The KV cache is ~3.87 GiB, so it is worth trading for slots | **≈0.47 GiB.** Measured. There is nothing to trade |
 | C9 | 🟠 medium | `reading the prompt: 103,976 of 103,983` means it read 103,976 tokens | That is the **already-reused** count; 7 tokens were read |
 | C10 | 🔴 high | A 23K A/B is enough to size the cache budget | **No.** 566 MiB parks in 6.7 s, 2.24 GiB takes 72 s. Snapshot cost is not linear |
+| C11 | 🔴 high | The conversation cache can never be used: 22 MB/s ⇒ every resume trips the watchdog | **Superseded by 0.1.48**, which reserves the budget at startup: 1.5–4 GB/s, a 46K resume costs **3.2 s** instead of 70 s |
+| C12 | 🔴 high | Decode is 38 tok/s, so the larger model is structurally slower | **38 is a cold-prefix artifact.** Real same-prefix sessions run **44–48**, up to 49. The harness was wrong, not the engine |
+| C13 | 🟠 medium | The KV cache is 0.47 GiB, so there is nothing to trade for slots | **8.44 GiB** at 160K / `q4_0` / 48 layers. 0.47 was a ~16K-token slice misread as the whole |
 
 Plus four gaps that would mislead a careful reader: [§G1](#g1-process-age-is-a-variance-input)
 (process age), [§G2](#g2-cjk-prompt-tokens-per-character), [§G3](#g3-metrics-spec-is-not-argv-spec),
 [§G4](#g4-a-bigger-ring-does-not-cost-slots).
+
+**C11–C13 come from the 2026-10-23 engine upgrade (0.1.46 → 0.1.48.1).** They are not refinements of
+C7/C8/C10 — they reverse their verdicts. If you took any configuration advice from this repository
+between 2026-10-19 and 2026-10-22, read those three before anything else.
 
 ---
 
@@ -343,6 +350,96 @@ against **36.3 tok/s / 95.2% / 364 MB** for a 78K prompt on the same box with cl
 snapshot stays under ~600 MB (≈24K tokens), or on a box with enough RAM that a 2.24 GiB write does not
 have to evict experts — 64 GB, which this box is not. Full measurements in `docs/10` §5, raw rows in
 `results/r26`.
+
+---
+
+## C11. The conversation cache is not impossible — the version changed
+
+**What I wrote.** C7, C10, `docs/10` §5 and the README verdict table: the conversation cache is
+**off**, permanently, because parking is slow enough to trip the 60 s watchdog and "the useful and
+the fatal snapshot sizes overlap, so no budget value separates them."
+
+**What is true.** On 0.1.48 the same feature is the reason to upgrade.
+
+| scenario | 0.1.45/0.1.46 | 0.1.48 |
+|---|---|---|
+| resume a 46K session after a 3K interruption | reused 0, 69.8 s | reused 46,192, **3.2 s** |
+| switch between two long sessions | full re-read | 3.1–3.7 s, all hitting |
+| park rate | 22 MB/s past ~600 MB | ~1.5–4.1 GB/s |
+| capacity | hand-set `--conversation-cache-mib`, never right | 8192 MiB auto-sized from free RAM at startup, 4 sessions, `evictions=0` |
+
+**Why the error happened.** Not a miscalculation — a version assumption. The 22 MB/s figure is a
+genuine log line from 0.1.45, where the park competes with the kernel for pages and evicts the
+mmap'd expert weights while writing. 0.1.48 **reserves its budget from measured free RAM at
+startup**, so the park no longer fights the page cache. Same feature name, different failure
+envelope.
+
+A second, quieter error: the 0.1.46 log contains **no conversation-cache line at all**. On that
+version the feature was never engaged, so the 22 MB/s sample was being used to indict something that
+was never running.
+
+**What it changes.** `--conversation-cache-mib` is gone from the configuration — do not set it, the
+engine sizes the cache itself. And the behavioural rule in `docs/10` §6 ("never open two long
+sessions") is now obsolete: on 0.1.48 both sessions stay resident.
+
+Full measurements: [`13-engine-0.1.48.md`](13-engine-0.1.48.md) §2.3,
+[`results/r31`](../results/r31-interleaved-session.csv).
+
+---
+
+## C12. Decode 38 was the harness, not the model
+
+**What I wrote.** Across `docs/01`, `docs/04` and the README: "IQ3_S decodes at ~38 tok/s, the
+smaller model did 44.3, so the upgrade costs 14% and that is structural — 45.7% expert coverage,
+nothing can be tuned back."
+
+**What is true.** Same binary, same 36 arguments, same pack:
+
+| workload | prompt reuse | hit | decode |
+|---|---|---|---|
+| six unrelated prompts in rotation | **0%** | 0.88 | **38** |
+| one 8K session, 6 appended turns | 98.7% | 0.964 | **47.6** (max 49.1) |
+| one 55K session, 5 appended turns | 99.9% | 0.968 | **44.8** |
+
+**Why the error happened.** The A/B harness rotates six unrelated prompts so that no arm can
+benefit from a prefix another arm warmed. That is exactly right for *comparing flags* and exactly
+wrong for *describing production*. Rotating costs 8 points of expert-cache hit rate and re-runs a
+full prefill every round, which together cost about 13% of decode. The bias is systematic and
+always in the same direction.
+
+**What it changes.** Every absolute decode figure in r17/r18/r27/r28 is a **lower bound**. Their
+relative verdicts stand — both arms were equally cold. The "the bigger model costs speed" conclusion
+is withdrawn: steady state is equal or better. See [`12-multiturn-probe.md`](12-multiturn-probe.md).
+
+---
+
+## C13. The KV cache is 8.44 GiB, not 0.47 GiB
+
+**What I wrote.** C8: "the KV cache is ≈0.47 GiB, measured; there is nothing to trade for slots."
+
+**What is true.** Measured from the VRAM ledger at 160K context, `q4_0`, 48 layers:
+
+| component | GiB |
+|---|---|
+| expert pool (11,240 slots × 1.879 MiB) | 20.62 |
+| dense weights | 1.43 |
+| **KV cache** | **8.44** |
+| runtime / workspace | 0.56 |
+| **total** | **31.05** of 34.33 available |
+
+The 0.47 GiB is roughly **one 16K-token slice**, misread as the whole. KV is the second-largest
+consumer, not a rounding error.
+
+**What it changes.** C8's verdict ("nothing to trade") is reversed: there *is* something to trade.
+The exchange rate is **10K of context ≈ 0.53 GiB ≈ 280 expert slots**, so dropping 160K → 100K
+buys about +1,720 slots (+15%, coverage 45.7% → 52.7%). That trade was still declined — 130K
+prefill measured at 713–716 tok/s, so long context is the machine's *best* operating range and
+cancelling it to chase 280-slot increments is a bad deal — but it was declined **on evidence, not on
+a wrong denominator**.
+
+What does *not* change: `--kv-resident` is still hopeless (a long-context token reads ~3.3 GiB of KV
+over PCIe ⇒ single-digit tok/s), `--kv k8v4` is still the wrong direction (816 B/cell vs 528),
+`--kv-grow` still requires `!multi_gpu`.
 
 ---
 

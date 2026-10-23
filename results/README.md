@@ -19,9 +19,22 @@ process start, 5 discarded preconditioning requests per workload, then 8 measure
 | `r24-kv-resident.csv` | `--kv-resident 40960` vs off: slot gain against decode cost | 2 rows |
 | `r25-long-context-restore.csv` | the 103,983-token request that died, and a 104K reproduction that did not | 3 rows |
 | `r26-conversation-cache-rollback.csv` | why r23's flag was removed an hour later: park rate falls 84 → 22 MB/s once the snapshot passes ~600 MB | 5 rows |
+| `r27-stage-tuning-arms.csv` | the 2026-10-23 tuning campaign on 0.1.46: context 204800→163840, prefill 8192→16384, ring 768→384, plus five rejections | 10 arms |
+| `r28-fixed-cache-io-prefetch.csv` | `STRATA_IO_PREFETCH` 0 vs 1, re-run with `--expert-cache 11240` pinned: identical decode, 33 fewer slots | 2 arms |
+| `r29-long-prefill.csv` | 66,301- and 123,047-token prompts: prefill throughput **rises** with length | 4 rows |
+| `r30-multiturn-probe.csv` | the same-prefix multi-turn probe that invalidated every earlier decode figure: 8K and 55K sessions | 11 rows |
+| `r31-interleaved-session.csv` | a 46K session interrupted by an unrelated 3K request, on 0.1.46 and on 0.1.48 | 8 rows |
+| `r32-v148-abba.csv` | 0.1.46 vs 0.1.48, and `STRATA_SPEC_COST` 0 vs 1, palindromic arm order, 3 rounds each | 6 rows |
+| `r33-v148-prefill-68k.csv` | the 68K prefill cost of 0.1.48's "prompt path borrows expert slots" mechanism | 4 rows |
 
 **r17/r18 are decode experiments on 0.1.44.1 with `--batch 2`. r19–r22 are 0.1.45 with `parallel: 1`.**
 They do not share a baseline; do not merge them into one table.
+
+**r27–r33 (2026-10-23) are 0.1.46 and 0.1.48 with `parallel: 1` and `--expert-cache 11240` pinned.**
+Two different harnesses appear here and they do not agree on purpose: r27/r28 use the six-case
+rotation (cold prefix), r30–r32 use the same-prefix multi-turn probe (warm). The cold numbers read
+~13% lower by construction — see [`../docs/12-multiturn-probe.md`](../docs/12-multiturn-probe.md).
+Compare r27/r28 only against each other, and r30–r32 only against r30–r32.
 
 ## Columns
 

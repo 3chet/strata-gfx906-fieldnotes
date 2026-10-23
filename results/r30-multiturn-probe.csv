@@ -1,0 +1,12 @@
+﻿scenario,turn,decode_tps,wall_s,hit_pct,reused_pct,note
+8k,1,36.2,20.4,0.964,98.7,first turn pays the full prefill
+8k,2,41.0,,0.964,98.7,turns 2-6 wall 4.9-6.0 s
+8k,3,44.3,,0.964,98.7,
+8k,4,49.1,,0.964,98.7,
+8k,5,47.6,,0.964,98.7,steady-state median 47.6
+8k,6,49.0,,0.964,98.7,highest sample of the run
+55k,1,43.0,81.2,0.968,99.9,first turn pays the full prefill
+55k,2,44.8,3.8,0.968,99.9,turns 2-5 wall 3.8-4.5 s
+55k,3,43.1,4.5,0.968,99.9,
+55k,4,47.4,4.0,0.968,99.9,
+55k,5,38.1,4.3,0.968,99.9,steady-state median 44.8

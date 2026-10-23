@@ -1,0 +1,7 @@
+﻿engine,spec_cost,workload,run1,run2,run3,mean,note
+0.1.46,,8k,45.1,,,45.1,production engine single measurement
+0.1.46,,55k,44.8,,,44.8,production engine single measurement
+0.1.48,0,8k,44.7,43.5,46.5,44.9,ABBA baseline arm
+0.1.48,0,55k,45.7,42.6,44.5,44.3,ABBA baseline arm
+0.1.48,1,8k,46.6,46.2,45.1,46.0,ABBA STRATA_SPEC_COST=1 arm
+0.1.48,1,55k,48.4,44.7,41.7,44.9,ABBA STRATA_SPEC_COST=1 arm

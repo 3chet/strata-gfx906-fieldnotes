@@ -1,5 +1,13 @@
 # The prefix cache, and why "reuse is sometimes 95 s" was the wrong diagnosis
 
+> ⚠️ **Partially superseded on 2026-10-23.** §1–§4 still hold: reuse is binary, any other prompt
+> erases the checkpoint, and the flag was correct to turn on. But §5's verdict — "the conversation
+> cache is off, permanently, because parking runs at 22 MB/s" — described **0.1.45** and does not
+> survive the move to **0.1.48**, which sizes the cache from free RAM at startup and parks at
+> 1.5–4.1 GB/s. On 0.1.48 an interrupted 46K session resumes in **3.2 s** instead of 69.8 s, and
+> `--conversation-cache-mib` is no longer set by hand.
+> See [`07-corrections.md`](07-corrections.md) C11 and [`13-engine-0.1.48.md`](13-engine-0.1.48.md) §2.3.
+
 A 38K conversation that normally resumes in **0.48 s** sometimes took **95 s**. The obvious reading —
 "checkpoint restore is unstable" — is wrong. There is no restore happening in that case. This file
 separates the two things that were being called one thing.

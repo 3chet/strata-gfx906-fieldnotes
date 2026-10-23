@@ -1,0 +1,3 @@
+﻿arm,io_prefetch,decode_p50,hit_pct,slots,note
+A,0,38.15,0.8749,11240,--expert-cache 11240 honoured in full
+B,1,38.15,0.8945,11207,prefetch buffer takes 33 slots away from the expert pool
