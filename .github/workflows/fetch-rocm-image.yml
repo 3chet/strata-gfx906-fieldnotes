@@ -14,44 +14,51 @@ on:
 permissions:
   contents: write
 
+env:
+  REPO: 3chet/strata-gfx906-fieldnotes
+  IMAGE: docker.io/mixa3607/rocm-gfx906:10.1-complete
+
 jobs:
   fetch:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - name: Disk space before
-        run: df -h / /tmp
+        run: df -h /
 
       - name: Pull image
         run: |
-          docker pull docker.io/mixa3607/rocm-gfx906:10.1-complete
-          docker image inspect docker.io/mixa3607/rocm-gfx906:10.1-complete \
-            --format '{{.Id}} {{.Size}}'
+          docker pull "$IMAGE"
+          docker image inspect "$IMAGE" --format '{{.Id}} size={{.Size}}'
 
-      - name: Save and split
+      - name: Save, compress, split
         run: |
           set -euo pipefail
-          docker save docker.io/mixa3607/rocm-gfx906:10.1-complete -o /tmp/rocm101.tar
-          ls -lh /tmp/rocm101.tar
-          split -b 800M /tmp/rocm101.tar /tmp/rocm101.part-
-          rm -f /tmp/rocm101.tar
+          docker save "$IMAGE" | zstd -T0 -3 -o /tmp/rocm101.tar.zst
+          rm -rf /tmp/zstd.tmp
+          ls -lh /tmp/rocm101.tar.zst
+          split -b 500M /tmp/rocm101.tar.zst /tmp/rocm101.part-
+          rm -f /tmp/rocm101.tar.zst
           ls -lh /tmp/rocm101.part-*
+          : > /tmp/rocm101.sha256
           for f in /tmp/rocm101.part-*; do
             echo "$(basename "$f") $(sha256sum "$f" | cut -d' ' -f1)" >> /tmp/rocm101.sha256
           done
           cat /tmp/rocm101.sha256
+          df -h /
 
       - name: Publish release assets
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh release delete rocm101-img --yes --cleanup-tag 2>/dev/null || true
-          gh release create rocm101-img \
-            --target "${{ github.sha }}" \
+          gh release delete rocm101-img --repo "$REPO" --yes --cleanup-tag 2>/dev/null || true
+          gh release create rocm101-img --repo "$REPO" \
             --title "ROCm 10.1 gfx906 image (docker save relay)" \
-            --notes "Temporary relay. Image: docker.io/mixa3607/rocm-gfx906:10.1-complete. Split 800 MiB parts, sha256 in rocm101.sha256. Delete this release once the image is loaded on the target host."
+            --notes "Temporary relay. Image: ${IMAGE}. Parts are 500 MiB slices of a zstd-compressed docker-save tarball; sha256 in rocm101.sha256. Reassemble with: cat rocm101.part-* | zstd -d | docker load. Delete this release once the image is loaded on the target host."
           for f in /tmp/rocm101.part-* /tmp/rocm101.sha256; do
-            gh release upload rocm101-img "$f"
+            gh release upload rocm101-img "$f" --repo "$REPO"
+            rm -f "$f"
           done
-          gh release view rocm101-img --json assets --jq '.assets[] | "\(.name) \(.size)"'
+          gh release view rocm101-img --repo "$REPO" --json assets \
+            --jq '.assets[] | "\(.name) \(.size)"'
