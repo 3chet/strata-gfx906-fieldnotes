@@ -1,0 +1,57 @@
+# Temporary relay: pull a Docker image from Docker Hub on a GitHub runner
+# (which can reach it) and publish it as split release assets, so it can be
+# downloaded from a network that cannot reach Docker Hub directly.
+# Delete this workflow and the "rocm101-img" release once the image is loaded.
+name: fetch-rocm-image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/fetch-rocm-image.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Disk space before
+        run: df -h / /tmp
+
+      - name: Pull image
+        run: |
+          docker pull docker.io/mixa3607/rocm-gfx906:10.1-complete
+          docker image inspect docker.io/mixa3607/rocm-gfx906:10.1-complete \
+            --format '{{.Id}} {{.Size}}'
+
+      - name: Save and split
+        run: |
+          set -euo pipefail
+          docker save docker.io/mixa3607/rocm-gfx906:10.1-complete -o /tmp/rocm101.tar
+          ls -lh /tmp/rocm101.tar
+          split -b 800M /tmp/rocm101.tar /tmp/rocm101.part-
+          rm -f /tmp/rocm101.tar
+          ls -lh /tmp/rocm101.part-*
+          for f in /tmp/rocm101.part-*; do
+            echo "$(basename "$f") $(sha256sum "$f" | cut -d' ' -f1)" >> /tmp/rocm101.sha256
+          done
+          cat /tmp/rocm101.sha256
+
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release delete rocm101-img --yes --cleanup-tag 2>/dev/null || true
+          gh release create rocm101-img \
+            --target "${{ github.sha }}" \
+            --title "ROCm 10.1 gfx906 image (docker save relay)" \
+            --notes "Temporary relay. Image: docker.io/mixa3607/rocm-gfx906:10.1-complete. Split 800 MiB parts, sha256 in rocm101.sha256. Delete this release once the image is loaded on the target host."
+          for f in /tmp/rocm101.part-* /tmp/rocm101.sha256; do
+            gh release upload rocm101-img "$f"
+          done
+          gh release view rocm101-img --json assets --jq '.assets[] | "\(.name) \(.size)"'
