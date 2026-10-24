@@ -1,0 +1,27 @@
+# One-shot cleanup: delete the temporary rocm101-img relay release.
+# Safe to delete this file afterwards.
+name: cleanup-relay
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/cleanup-relay.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  clean:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete relay release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          REPO=3chet/strata-gfx906-fieldnotes
+          gh release delete rocm101-img --repo "$REPO" --yes --cleanup-tag 2>/dev/null || echo "already gone"
+          echo "--- remaining releases ---"
+          gh release list --repo "$REPO" || true
