@@ -25,6 +25,8 @@ evidence → what it changes.**
 | C11 | 🔴 high | The conversation cache can never be used: 22 MB/s ⇒ every resume trips the watchdog | **Superseded by 0.1.48**, which reserves the budget at startup: 1.5–4 GB/s, a 46K resume costs **3.2 s** instead of 70 s |
 | C12 | 🔴 high | Decode is 38 tok/s, so the larger model is structurally slower | **38 is a cold-prefix artifact.** Real same-prefix sessions run **44–48**, up to 49. The harness was wrong, not the engine |
 | C13 | 🟠 medium | The KV cache is 0.47 GiB, so there is nothing to trade for slots | **8.44 GiB** at 160K / `q4_0` / 48 layers. 0.47 was a ~16K-token slice misread as the whole |
+| C14 | 🔴 high | Overlapping the CPU pool with the GPU is untapped and worth **+18–27%** | **Already implemented** (`expert_source.cpp:3720`, plan published before the CPU works). The real ceiling is **+6–7%**, and 67% of the CPU share is structurally exposed |
+| C15 | 🔴 high | End-to-end decode across a restart is the way to A/B a flag; one component of the window is a valid proxy | **Both fail below ~3%.** The restart ramp is worth **3.7 tok/s**, larger than any effect tested; a single component drifts with the hit rate (`−5.1%` then `+3.0%` for one flag). Sum the four components and stay in one process |
 
 Plus four gaps that would mislead a careful reader: [§G1](#g1-process-age-is-a-variance-input)
 (process age), [§G2](#g2-cjk-prompt-tokens-per-character), [§G3](#g3-metrics-spec-is-not-argv-spec),
@@ -33,6 +35,11 @@ Plus four gaps that would mislead a careful reader: [§G1](#g1-process-age-is-a-
 **C11–C13 come from the 2026-10-23 engine upgrade (0.1.46 → 0.1.48.1).** They are not refinements of
 C7/C8/C10 — they reverse their verdicts. If you took any configuration advice from this repository
 between 2026-10-19 and 2026-10-22, read those three before anything else.
+
+**C14–C15 come from the 2026-11-02 round on 0.1.55.** C14 was never published here, which is the only
+reason it is filed as a correction rather than an experiment: it was acted on privately first. C15 is a
+methods correction, and it invalidates any decode A/B in this repository that spans a restart and is
+quoted to better than ±8% — including some in `04`.
 
 ---
 
@@ -440,6 +447,92 @@ a wrong denominator**.
 What does *not* change: `--kv-resident` is still hopeless (a long-context token reads ~3.3 GiB of KV
 over PCIe ⇒ single-digit tok/s), `--kv k8v4` is still the wrong direction (816 B/cell vs 528),
 `--kv-grow` still requires `!multi_gpu`.
+
+---
+
+## C14. The pool overlap is already implemented, and it is worth +6–7% not +18–27%
+
+**What I wrote** (private notes, never in this repository, which is its own mistake). The per-window
+accounting shows `pool + plan` at 4.5 ms of an 18.2 ms window, spent before the GPU is told to start.
+That reads as 4.5 ms of GPU idle, so hiding it looked like **+18–27%** and became the top-ranked
+project on the list.
+
+**What is true.** The overlap exists. The ordering that matters is inside the dispatch, not at the
+call site:
+
+```cpp
+// expert_source.cpp:3720
+// ---- plan v0.3 P6: the GPU's share, decided and published FIRST
+//      so the GPU starts while the CPU works.
+:3849  if (P.publish) P.publish(P.ctx);        // flag A → the GPU starts
+:3968  d.pool->run_split_multi_native(...)     // the CPU's share, blocking
+```
+
+and the GPU side waits only for the misses, after computing the resident experts (`verify.cpp:1636`
+then `:1644`). `plan` is **0.12 ms per window — 0.3%**. There was never a 4.5 ms hole there: the 4.5 ms
+is the CPU's own work, running concurrently.
+
+**Evidence, one variable.** Drop the pool from 5 workers to 2, so the CPU share takes ~1.8× longer. If
+the overlap is real the window must not follow it one-to-one:
+
+| arm | window | `run` (CPU share) | decode |
+|---|---:|---:|---:|
+| workers = 5 | 38.3 / 41.8 / 41.7 ms | 3.45–5.18 ms | 45.1 / 46.8 / 42.9 |
+| workers = 2 | 44.4 / 42.5 ms | 6.43–6.62 ms | 41.7 / 44.9 / 41.4 |
+
+It follows it — **decode −7.5% for a 1.8× slower CPU share, i.e. ~67% exposed.** The correct ceiling is
++6–7%, and it is not reachable, because the CPU cannot begin until the GPU's in-layer router produces
+the expert ids.
+
+**Why the error happened.** I read `core/verify.cpp` at the call site (`pool(...)` then
+`raise_flag(...)`) and inferred the ordering from two adjacent lines, without following `pool` into the
+dispatch layer where the publish actually happens. The comment at `3720` says the opposite of my
+inference, in a line I had already read.
+
+**What it changes.** The top-ranked project is cancelled, not deferred. The numbers downstream of it
+move too: the concurrency penalty ("dual stream produces 74% per unit of GPU work") is not a scheduler
+bug to be fixed — it is the same exposed CPU share with two requests queued behind it.
+
+---
+
+## C15. Two measurement methods that cannot resolve what they were used to resolve
+
+**What I wrote.** `02-methodology.md` prescribes a five-request preconditioning discard per arm; the
+implicit assumption elsewhere is that comparing the mean of eight samples across a restart is enough,
+and that when a restart is unavoidable, reading the one component of the window the flag targets is a
+valid substitute.
+
+**What is true.** Neither survives an effect smaller than ~3%.
+
+| method | why it fails | size of the error |
+|---|---|---|
+| end-to-end decode across a restart | the ramp is not 5 requests. First sample of a fresh process was **19.6 tok/s**, plateau after ~10 min (the expert profile is still learning, the page cache is still warming) | **3.7 tok/s** between "long-running" and "just restarted" — larger than every effect tested |
+| one component of the split | components are not independent. A better pool starts the GPU earlier, so `wait` rises and absorbs the gain. `pool + plan` also tracks the hit rate | same flag read **−5.1%** then **+3.0%** |
+
+The demonstration that made the first one impossible to ignore is worth keeping. An arm measured 46.20
+(fresh restart) against a 47.80 baseline (process up 7 h 42 min) — a convincing 3.3% loss. The *control*
+arm, same config as the baseline, also on a fresh restart, measured **44.10**. The control lost more
+than the treatment. Both numbers were the ramp.
+
+**What replaced them**, both needing no rebuild:
+
+```
+window = wait + pool + plan + staging + commit        # sum, never one term
+```
+
+Within-batch reproducibility on that sum: **0.57%** (two baseline runs) and **0.19%** (two aux-cpus
+runs), against a between-arm difference of **1.26%**. That is how a 1.26% flag got adopted on evidence
+instead of being waved through as noise — and it is also why three other candidates could be rejected
+without a second thought.
+
+**Why the error happened.** The ramp is in `02`, but it is described as a *warm-up* problem, so I kept
+solving it with more discarded requests. It is a **ten-minute** process-level effect, not a
+five-request one, and no amount of discarding inside the first minute fixes it.
+
+**What it changes.** Any decode A/B in this repository that spans a restart and is quoted tighter than
+±8% is suspect; the three in `04` for `--pool-tasks` and `STRATA_POOL_SPIN_US` were re-judged on the
+component sum instead, and both stand as losses for a stronger reason than the original numbers gave.
+New protocol: same process where the flag allows it, four-component sum where it does not.
 
 ---
 

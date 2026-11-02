@@ -27,6 +27,26 @@ nothing**. That ratio is the useful part.
 
 ---
 
+## 2026-11-02: what changed, in five lines
+
+| | |
+|---|---|
+| **The last knob** | `--aux-cpus auto` is **+1.26%** and is now in production. It does not make the pool faster — it stops the host thread sharing a core with 8 driver threads. `--pool-tasks 64` and `STRATA_POOL_SPIN_US=50000` are both **slower** |
+| **A retracted project** | "Overlap the CPU pool with the GPU for +18–27%" — **already implemented** (`expert_source.cpp:3720`), and worth **+6–7%** at most because 67% of the CPU share is structurally exposed. Cancelled, not deferred |
+| **The methods fix** | Two standard instruments cannot resolve 1–3%: decode A/B across a restart (the ramp is **3.7 tok/s**, and a ten-minute effect, not five requests) and any **single** component of the window. Sum all four, stay in one process: reproducible to **0.19–0.57%** |
+| **A negative result on clocks** | Decode runs at the **lowest** DPM state 56% of the time. Forcing `high` locks memory at 1000 MHz and almost triples high-`sclk` residency — decode **46.75 → 46.10**. Not clock-bound either |
+| **Community kernels** | Three gfx906 patches from a public fork: **0 anchor hits**, because the mechanisms are already in this engine and stricter (`native_gdn.cu`, `native_mmvq.cu`). The one real gap is the unused `sdot4`/`v_dot2`, and it pays only on Q4_0 |
+
+Full write-ups: [`docs/14`](docs/14-host-side-switches.md) (the knobs and the two instruments) ·
+[`docs/15`](docs/15-why-decode-stops.md) (the ceiling, and four explanations that do not survive).
+
+> **Scope note.** Between 10-23 and 11-02 the box also changed underneath this repository: engine
+> 0.1.48 → **0.1.55**, pack IQ3_XXS → **IQ3_S**, RAM 48 → **80 GB**, `parallel: 1` → **`2`**,
+> context → 204800. Those are not written up here. The hardware table below is updated to the current
+> state and the historical tables keep their own version labels — see the version discipline note there.
+
+---
+
 ## 2026-10-23: what changed, in five lines
 
 | | |
@@ -55,7 +75,10 @@ Full write-ups: [`docs/12`](docs/12-multiturn-probe.md) · [`docs/13`](docs/13-e
 | `--suffix-draft 0` | ❌ rejected | −6.7% on echo, 1.7× the noise floor. The default (3) is doing real work |
 | `--mtp-q4 all` | ❌ rejected | Draft layer **grows** 912 → 949 MiB. The Q4 copy is loaded *in addition*, not instead |
 | `--prefill-head-alias` | 🚫 unavailable | Source refuses it here: layer split and `short_read` both disqualify |
-| `--pool-workers` | 🚫 no headroom | 6 physical cores, 5 workers + host already use all of them |
+| `--pool-workers` | 🚫 no headroom | 6 physical cores, 5 workers + host already use them all. Above 5 the surplus worker gets `core = -1` and is **silently left unpinned** — not an experiment |
+| **`--aux-cpus auto`** | ✅ **adopted** | **−1.26%** on the four-component window sum, reproducible twice. Moves 27 driver threads off the host core (9 → 1 bound threads); the gain lands in `wait` and `commit`, not in `pool` |
+| `--pool-tasks 64` | ❌ rejected | **+8.2%** on `pool + plan`. A task is a **row** (~26,880 per layer), not an expert, so 18 already leaves a one-task tail — finer only multiplies atomic contention |
+| `STRATA_POOL_SPIN_US=50000` | ❌ rejected | +0.62% on top of `--aux-cpus auto`. A spinning worker holds its core; the 20 ms default is right |
 | `--batch 3` | ❌ rejected | Peak concurrency is 2; 3 costs 0.69 GiB and 123 slots |
 | `--kv-grow` | 🚫 unavailable | Requires `!multi_gpu` (`generate.cpp:4397`) — a layer split disqualifies it |
 | `--kv-resident 40960` | ❌ rejected | **+3.9% slots for −6.9% decode**. A long-context token reads ~3.3 GiB of KV over PCIe ⇒ single-digit tok/s. (It also produced the wrong "KV is 0.47 GiB" — the real figure is **8.44 GiB**, see [`docs/07`](docs/07-corrections.md) C13) |
@@ -68,6 +91,7 @@ Full write-ups: [`docs/12`](docs/12-multiturn-probe.md) · [`docs/13`](docs/13-e
 | `STRATA_SPEC_COST=1` | 🚫 not detected | +2.4% at 8K, +1.5% at 55K, both inside the ±4–8% floor, and both times runs 1–2 looked good and run 3 collapsed. Not adopted |
 | `--expert-cache 11240` (pin it) | ✅ **adopted** | `auto` recomputes the slot count on every restart (11,049 / 11,189 / 11,240 observed) — pin `N` before any A/B. Note `N` is a **ceiling**: VRAM wins, so an arm may land 33 slots lower |
 | DFlash2 drafter | 🚫 **unavailable** | `generate.cpp:5478` gates it to one card + CLI: `--serve`, `--batch` or a layer split each disable it. Also 330 MiB short on VRAM, and the checkpoints it needs sit on both cards |
+| Q4_0 / IQ4_XS pack | ⛔ **closed** | IQ4_XS measured **−14–18%** decode. Q4_0: blob ×1.83 ⇒ a ~88.8 GB pack against a ~67 GB page-cache budget, slots **−45%**, `pool + plan` ×2 ⇒ expected **25–32 tok/s**. Quality trade, not a speed one — see [`docs/15 §5`](docs/15-why-decode-stops.md) |
 | `STRATA_EMB_REUSE_ACCOUNT=1` | 🚫 no mechanism | Both of its outlets are pinned by this config (`--prefill auto:16384` and the env ring) |
 | `rocBLAS` table filling | ❌ rejected | `default` rows are the calibrator's verdict, not blanks |
 
@@ -103,10 +127,16 @@ setting neutral. Fixing that changed the verdicts.
 |---|---|
 | GPUs | 2× AMD Radeon Pro VII 16 GB (gfx906, **no `sramecc-`, xnack-**) |
 | CPU | AMD Ryzen 5 2600 — **6 physical cores / 12 threads**, no AVX-512 (AVX2 only) |
-| RAM | 48 GB (4 DIMMs, 8+16+8+16 @ 1866 MT/s) |
-| Model | Qwen3.8-Flash-Next, **IQ3_XXS**, ~47 GB mmap'd |
-| Engine | **0.1.45** today; the r17/r18 A/B below ran on **0.1.44.1** (`build-714`) |
-| Split | `--layer-split auto` → layers 0–15 / 16–47, **`parallel: 1`** (no `--batch`) |
+| RAM | **80 GB** (32+16+16+16 @ 2133 MT/s). It was 48 GB (8+16+8+16 @ 1866) for r17–r33 |
+| Model | Qwen3.8-Flash-Next, **IQ3_S**, ~48.5 GB mmap'd. r17–r33 measured **IQ3_XXS**, ~47 GB |
+| Engine | **0.1.55** today. r27–r33 on 0.1.46/0.1.48; r17/r18 on 0.1.44.1 (`build-714`) |
+| Split | `--layer-split auto` → layers 0–25 / 26–47, **`parallel: 2`**. r17–r33 ran `parallel: 1` |
+
+**Current baseline (0.1.55, IQ3_S, `parallel: 2`, 900-token requests):** single stream **47.8 tok/s**
+at hit 0.975, two streams **82–84 tok/s** combined (1.95×). Prefill: 485 at 8K, 505–520 at 16K,
+570 at 20K, 654 at 33K, **820–865 at 74K**. 11,958 expert slots, `vram_free` 848 MiB.
+The single-stream figure needs **~10 minutes after a restart** to get there — see
+[`docs/14 §1`](docs/14-host-side-switches.md).
 
 > **Version discipline.** Every absolute number here carries the engine version it came from.
 > ✓/✗ verdicts are about mechanisms and travel between builds; tok/s does not.
@@ -148,6 +178,8 @@ docs/
   11-long-context-and-verify-timeout.md  ★ why a 100K session dies, and the log line that misleads
   12-multiturn-probe.md         ★ decode is 44–48, not 38 — the harness was measuring a cold prefix
   13-engine-0.1.48.md           ★ upgrading to 0.1.48.1: what it costs, and the 70 s → 3 s payoff
+  14-host-side-switches.md      ★ the last three knobs, and the two instruments that were lying
+  15-why-decode-stops.md        ★ the ceiling: four explanations that do not survive, two that do
 scripts/
   measure_steady.sh             decode: pre-condition + measure, with the hit-rate plateau check
   measure_prefill.py            prefill: nonce per request, `reused == 0` enforced, reads /metrics
@@ -172,6 +204,10 @@ results/
   r31-interleaved-session.csv         8 rows · a 46K session interrupted by 3K: 69.8 s vs 3.2 s
   r32-v148-abba.csv                   6 rows · 0.1.46 vs 0.1.48 (+ SPEC_COST 0/1), ABBA, 3 rounds each
   r33-v148-prefill-68k.csv            4 rows · the −2% prefill cost of "prompt path borrows slots"
+  r34-host-side-switches.csv          5 arms · the last three knobs, on the four-component window sum
+  r35-pool-tasks-and-plan.csv         2 arms · --pool-tasks 64: +8.2% on the component it targets
+  r36-pool-exposure.csv               2 arms · workers 5 → 2: 67% of the CPU's expert share is exposed
+  r37-gpu-clock.csv                   2 arms × 110 samples · DPM auto vs forced high: decode unchanged
 ```
 
 ---
@@ -185,6 +221,10 @@ results/
 - Absolute tok/s numbers, and the `K` the placement search picks (it moved 20 → 16 between builds).
 - The exact chunk where the ring saturates (20992 here) — it follows from `384 slots × layers`, so a
   different ring or a different expert count moves the cliff.
+- **The DPM governor treats decode as a light load** — 56% of samples at the lowest `sclk` state, 43% at
+  the lowest `mclk`. Forcing `high` triple the high-clock residency and changed decode by **−1.4%**.
+  Whether your card upclocks differently is worth one 5-minute check, not an assumption either way
+  (`docs/15 §3`).
 
 **Generalises to any Strata box, and to many live-service A/B studies:**
 
@@ -193,6 +233,16 @@ results/
   at identical config, with the same median. Restart before *both* arms (`docs/07 §G1`).
 - "Within-arm spread ≥ between-arm difference ⇒ noise" as a decision rule.
 - Two same-config arms as a *measured* null, instead of an assumed one.
+- **A restart destroys effects smaller than ~3%, and "discard 5 requests" does not fix it.** The ramp
+  here is a **ten-minute** process-level effect worth **3.7 tok/s**, not a warm-up worth five requests.
+  A/B in one process wherever the flag allows it; when it does not, see the next line (`docs/14 §1`).
+- **A window split is one measurement, not four.** A cheaper pool makes the GPU start earlier, which
+  raises `wait` and absorbs the gain, so any single component drifts with the hit rate: one flag read
+  **−5.1%** and then **+3.0%**. Sum `wait + pool + plan + staging + commit`, and quote the within-batch
+  spread next to the between-arm difference (`docs/14 §2`).
+- **Before building an overlap, check whether the engine already publishes early.** A plausible reading
+  of two adjacent lines at the call site produced a "+18–27%" project for something implemented one
+  layer down, worth +6–7%, with a comment saying so (`docs/07 §C14`).
 - **A layer split silently shrinks the prefill ring** to 96; one env var puts it back (`docs/08`).
 - **The prefix cache is all-or-nothing** — a 1,986-token request discards a 38K checkpoint as
   completely as a 68K one (`docs/10`).
@@ -209,6 +259,20 @@ results/
 - GPU memory is reclaimed **asynchronously** after the process exits — poll for it.
 - **A flag can be silently overridden** — `--pipeline-windows` was reset to 0 by `--batch` with no
   log line on the auto path. Check the banner, not the argument you passed.
+
+---
+
+## Open items
+
+- **The prefill path has never been taken apart.** Decode is closed ([`docs/15 §6`](docs/15-why-decode-stops.md)),
+  but the upstream source itself notes that at 32K `qsa attn` is 21% of the prompt and instruction-issue
+  bound at 3.4 TFLOP/s. One run of `STRATA_PREFILL_TIMING=1` settles it: **a segment above 20% justifies
+  a custom kernel, below 10% drop the idea.** It affects time-to-first-token on long prompts, not tg.
+- **The CPU side is one bottleneck with two solutions — pick one, not both.** A faster CPU on the same
+  socket (+15–18%, one day, reversible) or a hand-written AVX2 expert kernel (24.5% → 40% of peak,
+  +3–8%, 2–3 weeks).
+- Re-learn the expert profile (1–2% expected): the traffic distribution has moved since the current
+  `learned.bin` was written.
 
 ---
 

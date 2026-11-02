@@ -1,0 +1,3 @@
+﻿arm,windows_stage0,pool_plan_stage0_ms,windows_stage1,pool_plan_stage1_ms,total_ms,delta_pct,verdict
+pool-tasks-18-default,6386,3.047,6386,1.472,4.519,0.00,baseline
+pool-tasks-64,6629,3.213,6629,1.678,4.891,8.23,rejected

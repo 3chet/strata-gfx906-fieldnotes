@@ -1,0 +1,3 @@
+﻿dpm_level,samples,sclk_low_state_mhz,sclk_low_pct,sclk_high_samples,sclk_max_mhz,mclk_locked_mhz,mclk_low_pct,decode_tok_s
+auto,110,860,56,21,1700,350,43,46.75
+high,110,860,,61,1700,1000,0,46.10

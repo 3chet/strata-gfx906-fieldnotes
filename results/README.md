@@ -26,6 +26,25 @@ process start, 5 discarded preconditioning requests per workload, then 8 measure
 | `r31-interleaved-session.csv` | a 46K session interrupted by an unrelated 3K request, on 0.1.46 and on 0.1.48 | 8 rows |
 | `r32-v148-abba.csv` | 0.1.46 vs 0.1.48, and `STRATA_SPEC_COST` 0 vs 1, palindromic arm order, 3 rounds each | 6 rows |
 | `r33-v148-prefill-68k.csv` | the 68K prefill cost of 0.1.48's "prompt path borrows expert slots" mechanism | 4 rows |
+| `r34-host-side-switches.csv` | the last three host-side candidates, judged on the **four-component window sum** | 5 arms |
+| `r35-pool-tasks-and-plan.csv` | `--pool-tasks 64` vs default 18, on the component it targets | 2 arms, 13,015 windows |
+| `r36-pool-exposure.csv` | workers 5 → 2: how much of the CPU's expert share is exposed on the critical path | 2 arms × 3 and 2 requests |
+| `r37-gpu-clock.csv` | DPM `auto` vs forced `high`: clock residency during decode, and what it changed | 2 arms × 110 samples |
+
+**r34–r37 (2026-11-02) are 0.1.55, IQ3_S, `parallel: 2`, `--pool-workers 5`.** They differ in kind from
+everything above: **r34/r35/r37 are aggregates reconstructed from the engine's own timing lines, not
+per-request samples.** The window-split lines are accumulated per stage, so a per-request breakdown does
+not exist for them, and the raw log rotated on the next engine start. They are included because the
+alternative — quoting the numbers in the docs with no file at all — breaks the rule that a claim here is
+tied to a file. Treat their precision as the engine's, and note that r34's arms are not independent
+restarts: the two `default` rows bracket all three test arms in time, which is exactly how the
+within-batch spread of 0.57% was established.
+
+**r34 is the first set in this repository judged on `wait + pool + plan + staging + commit` rather than
+on decode or on a single component** — see
+[`../docs/07-corrections.md` C15](../docs/07-corrections.md#c15-two-measurement-methods-that-cannot-resolve-what-they-were-used-to-resolve)
+for why the two conventional instruments could not resolve 1.26%.
+
 
 **r17/r18 are decode experiments on 0.1.44.1 with `--batch 2`. r19–r22 are 0.1.45 with `parallel: 1`.**
 They do not share a baseline; do not merge them into one table.

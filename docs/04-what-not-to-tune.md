@@ -139,6 +139,20 @@ already busy.**
 Note also: `--pool-workers` has **never varied** in 416 logged samples, so history cannot evaluate it —
 this one needs a real arm, and the physics says do not bother.
 
+**What going above 5 actually does** (asked 2026-11-02, worth recording because it is silent):
+
+```cpp
+const int core = pin ? (i < worker_cores.size() ? worker_cores[i] : -1) : -1;
+```
+
+The worker list only ever receives `!is_sibling` cores — the first thread of each physical core, with a
+comment citing issue #40 (siblings share one core's load/store bandwidth, so two workers per core halves
+it). On 6 cores minus the host's, that is 5 slots. Worker 6 therefore gets `core = -1`, and
+`pin_this_thread(-1)` **returns false without an error**. The thread goes unpinned and floats under the
+scheduler: it may land on an idle SMT sibling, or on a core a pinned worker already owns. That is not an
+experiment, it is a coin flip — and it is now mutually exclusive with `--aux-cpus auto`, which claims the
+sibling slots first (see [`14 §3.1`](14-host-side-switches.md)).
+
 ---
 
 ## 6. `--prefill` chunk above 16384 — rejected, and the first evidence for it was an artefact
@@ -352,6 +366,50 @@ state the KV's true size on the record. It did, and the number was 8× smaller t
 0.35 GiB for 40,960 of 163,840 cells ⇒ **≈0.47 GiB total**. That kills the whole "trade KV VRAM for
 expert slots" line of thinking, including lowering `--max-context` — see
 [11 §4](11-long-context-and-verify-timeout.md#4-the-kv-cache-is-047-gib-not-387-gib--and-lowering---max-context-buys-nothing).
+
+---
+
+## 16. `--pool-tasks 64` — rejected, and the task unit is a row, not an expert
+
+**Reasoning for trying it:** the pool divides each layer's work into tasks and the workers claim them
+with a `fetch_add` race, so a coarse task count should leave a ragged tail. The default resolves to
+`3 × (workers + 1)` = **18**.
+
+The premise was wrong in a way worth writing down. **A task is a row, not an expert.** `mrows_ = n × FF`
+with `FF = 640`, so one layer offers ~26,880 rows against 18 claims: the tail is at most 1/18 of a
+phase, not the 30–40% that "one task per expert" implies. Claiming is already a dynamic race, so 18
+tasks over 6 threads leaves a tail of exactly one.
+
+| task count | `pool + plan`, stage 0 | stage 1 | total | windows |
+|---|---:|---:|---:|---:|
+| 18 (default) | 3.047 ms | 1.472 ms | **4.519 ms** | 6,386 |
+| 64 | 3.213 ms | 1.678 ms | **4.891 ms (+8.2%)** | 6,629 |
+
+**Verdict: rejected.** Finer granularity only multiplies atomic contention by 3.5×; stage 1 (small
+tasks) loses the most, +14%. Not tested at 128 — the direction is established and monotone.
+
+> Method note: this arm was judged on `pool + plan` alone, before C15 in
+> [`07`](07-corrections.md#c15-two-measurement-methods-that-cannot-resolve-what-they-were-used-to-resolve).
+> That component is the thing the flag was designed to move and it moved by 3.5× the resolution, so the
+> rejection stands — but see [`14 §2`](14-host-side-switches.md) for why that is usually a mistake.
+
+---
+
+## 17. `STRATA_POOL_SPIN_US=50000` — rejected, the 20 ms default is right
+
+The pool workers spin before sleeping, with `kSpinBeforeSleep = 20 ms`. That sits awkwardly between the
+two window sizes: single-stream ~23 ms (so a worker sleeps once per layer), dual-stream ~18.2 ms (so it
+does not). Raising it to 50 ms should therefore remove a sleep/wake per layer on single stream.
+
+Stacked on `--aux-cpus auto`, so the comparison is against the best configuration available:
+
+| | four-component window total |
+|---|---:|
+| `--aux-cpus auto` alone | **33.570 ms** |
+| \+ `STRATA_POOL_SPIN_US=50000` | 33.810 ms (**+0.62%**) |
+
+**Verdict: rejected.** A spinning worker holds its core; with 5 workers on 6 cores plus a host thread,
+the contention it adds is larger than the wake-up latency it saves. Do not touch the default.
 
 ---
 

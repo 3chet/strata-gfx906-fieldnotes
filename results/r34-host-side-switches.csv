@@ -1,0 +1,6 @@
+﻿arm,batch,stage0_total_ms,stage1_total_ms,total_ms,delta_vs_baseline_pct,verdict
+default,1,18.930,15.197,34.127,0.28,baseline
+default,2,18.912,15.023,33.935,-0.28,baseline-repeat
+aux-cpus-auto,1,18.717,14.918,33.635,-1.16,adopted
+aux-cpus-auto,2,18.712,14.858,33.570,-1.35,adopted-repeat
+aux-cpus-auto+pool-spin-us-50000,1,18.805,15.005,33.810,-0.65,rejected

@@ -28,6 +28,25 @@
 
 ---
 
+## 2026-11-02 这次更新，五句话说清
+
+| | |
+|---|---|
+| **最后一个旋钮** | `--aux-cpus auto` 值 **+1.26%**，已进生产。它不让 pool 变快——它让 host 线程不再和 8 个驱动线程挤一个核。`--pool-tasks 64` 与 `STRATA_POOL_SPIN_US=50000` 都**更慢** |
+| **撤回一个立项** | 「把 CPU pool 与 GPU 做成两段式重叠，值 +18~27%」——**代码里早就做了**（`expert_source.cpp:3720`），而且上限只有 **+6~7%**，因为 CPU 那部分有 67% 结构性暴露。是撤销，不是延期 |
+| **测量方法纠错** | 两个标准手段分辨不了 1~3%：跨重启的 decode A/B（爬坡值 **3.7 tok/s**，且是**十分钟**级不是五请求级）、以及窗口的**任何单项**分量。四分量求和、同进程测：可重现到 **0.19~0.57%** |
+| **一个关于频率的负结果** | decode 有 56% 的采样时间停在 DPM **最低档**。强制 `high` 让显存锁满 1000 MHz、高频档时间近三倍——decode **46.75 → 46.10**。也不受频率限制 |
+| **社区 kernel** | 公开 fork 的三个 gfx906 补丁：**锚点 0 命中**，因为机制本引擎已内建且更严格（`native_gdn.cu`、`native_mmvq.cu`）。唯一真缺口是没被使用的 `sdot4`/`v_dot2`，而它只在 Q4_0 上才划算 |
+
+专文：[`docs/14`](docs/14-host-side-switches.md)（三个旋钮与两个说谎的仪器）·
+[`docs/15`](docs/15-why-decode-stops.md)（天花板，以及四条不成立的解释）。
+
+> 说明：10-23 到 11-02 之间还发生了若干变更（引擎 0.1.48 → **0.1.55**、量化 IQ3_XXS → **IQ3_S**、
+> 内存 48 → **80 GB**、并发 `parallel: 1` → **`2`**、ctx → 204800），它们没有单独成文，
+> 下面「硬件与基线」按**现状**更新，历史表保留原版本标注。
+
+---
+
 ## 2026-10-23 这次更新，五句话说清
 
 | | |
@@ -56,7 +75,10 @@
 | `--suffix-draft 0` | ❌ 否决 | echo 上 −6.7%，是噪声底的 1.7 倍。**默认值 3 在做正功** |
 | `--mtp-q4 all` | ❌ 否决 | draft 层显存 **912 → 949 MiB 反向增加**。Q4 是额外加载，不是替换 |
 | `--prefill-head-alias` | 🚫 不可用 | 源码硬拒绝：layer split 与 `short_read` 两条违例 |
-| `--pool-workers` | 🚫 无余量 | 6 物理核，5 worker + host 已全部占满 |
+| `--pool-workers` | 🚫 无余量 | 6 物理核，5 worker + host 已全部占满。超过 5 之后多出来的 worker 拿到 `core = -1` 并**静默不绑核**——那不是实验，是抛硬币 |
+| **`--aux-cpus auto`** | ✅ **采纳** | 四分量窗口总和 **−1.26%**，两次可重现。把 27 个驱动线程移出 host 核（绑定线程 9 → 1）；收益落在 `wait` 与 `commit`，**不在 `pool`** |
+| `--pool-tasks 64` | ❌ 否决 | `pool + plan` **+8.2%**。task 的单位是**行**（每层约 26,880 行）不是专家，18 个已经只剩一个 task 的尾巴——调细只把原子争用放大 3.5 倍 |
+| `STRATA_POOL_SPIN_US=50000` | ❌ 否决 | 叠加在 `--aux-cpus auto` 之上 **+0.62%**。worker 持续自旋会占住核；20 ms 默认值是对的 |
 | `--batch 3` | ❌ 否决 | 峰值并发只有 2；提到 3 占 0.69 GiB、少 123 个槽 |
 | `--kv-grow` | 🚫 不可用 | 源码要求 `!multi_gpu`（`generate.cpp:4397`），双卡出局 |
 | `--kv-resident 40960` | ❌ 否决 | **+3.9% 槽换 −6.9% 解码**。长上下文每生成一个 token 要读约 3.3 GiB KV 走 PCIe ⇒ 掉到个位数 tok/s。（它还顺带产出了"KV 只有 0.47 GiB"这个错数，真值是 **8.44 GiB**，见 [`docs/07`](docs/07-corrections.md) C13） |
@@ -69,6 +91,7 @@
 | `STRATA_SPEC_COST=1` | 🚫 未检出 | 8K +2.4%、55K +1.5%，都在 ±4~8% 噪声底内，且两次都是"前两轮好看、第三轮回落"。不定档 |
 | `--expert-cache 11240`（固定） | ✅ **采纳** | `auto` 每次重启自算（实测 11,049 / 11,189 / 11,240 三种），A/B 前必须钉死 N。注意 N 是**上限**：显存优先，某臂可能落在低 33 槽 |
 | DFlash2 drafter | 🚫 **不可用** | `generate.cpp:5478` 硬限单卡 + CLI：`--serve`、`--batch`、layer split 任一成立即关闭。另外显存还差 330 MiB，它要的 hidden state 分布在两张卡上 |
+| Q4_0 / IQ4_XS 量化档 | ⛔ **已结案** | IQ4_XS 实测 **−14~18%**。Q4_0：专家 blob ×1.83 ⇒ pack 约 **88.8 GB**，而可用页缓存只有约 **67 GB**，槽位 **−45%**、`pool + plan` 翻倍 ⇒ 预期 **25~32 tok/s**。这是质量换速度的交易，不是提速——见 [`docs/15 §5`](docs/15-why-decode-stops.md) |
 | `STRATA_EMB_REUSE_ACCOUNT=1` | 🚫 无机制 | 它仅有的两个出口都被本配置钉死（`--prefill auto:16384` 与 env ring） |
 | rocBLAS 补表 | ❌ 否决 | `default` 行是标定器的判决，不是待补的空行 |
 
@@ -128,10 +151,15 @@
 |---|---|
 | 显卡 | 2× AMD Radeon Pro VII 16 GB（gfx906，`sramecc-`、`xnack-`） |
 | CPU | AMD Ryzen 5 2600——**6 物理核 / 12 线程**，无 AVX-512（只有 AVX2） |
-| 内存 | 48 GB（4 条混插，8+16+8+16 @ 1866 MT/s） |
-| 模型 | Qwen3.8-Flash-Next **IQ3_XXS**，约 47 GB，`--mmap-experts` |
-| 引擎 | 现在是 **0.1.45**；下面的 r17/r18 A/B 跑在 **0.1.44.1**（`build-714`） |
-| 切分 | `--layer-split auto` → 层 0–15 / 16–47，**`parallel: 1`**（无 `--batch`） |
+| 内存 | **80 GB**（32+16+16+16 @ 2133 MT/s）。r17~r33 那时是 48 GB（8+16+8+16 @ 1866） |
+| 模型 | Qwen3.8-Flash-Next **IQ3_S**，约 48.5 GB mmap。r17~r33 测的是 **IQ3_XXS**，约 47 GB |
+| 引擎 | 现在是 **0.1.55**。r27~r33 跑 0.1.46/0.1.48；r17/r18 跑 0.1.44.1（`build-714`） |
+| 切分 | `--layer-split auto` → 层 0–25 / 26–47，**`parallel: 2`**。r17~r33 是 `parallel: 1` |
+
+**当前基线**（0.1.55，IQ3_S，`parallel: 2`，900-token 请求）：单流 **47.8 tok/s**（命中 0.975），
+双流合计 **82~84 tok/s**（1.95×）。prefill：8K 485、16K 505~520、20K 570、33K 654、**74K 820~865**。
+专家槽 11,958，`vram_free` 848 MiB。单流这个数**重启后要约 10 分钟**才能爬到位——见
+[`docs/14 §1`](docs/14-host-side-switches.md)。
 
 > **版本纪律**：每个绝对值都带它来自哪个引擎版本。✓/✗ 的裁决讲的是机制，可以跨版本；
 > tok/s 不行。见 [`docs/07 §C6`](docs/07-corrections.md#c6-version-labels-on-every-absolute)。
@@ -171,6 +199,8 @@ docs/
   11-long-context-and-verify-timeout.md  ★ 10 万 token 会话为什么死，以及那句会骗人的日志
   12-multiturn-probe.md         ★ decode 是 44~48 不是 38——旧脚本量的是冷前缀
   13-engine-0.1.48.md           ★ 升到 0.1.48.1：代价是什么，以及 70 s → 3 s 的收益
+  14-host-side-switches.md      ★ 最后三个主机侧旋钮，以及两个在说谎的仪器
+  15-why-decode-stops.md        ★ 天花板：四条不成立的解释，两条成立的
 scripts/
   measure_steady.sh             decode：预热 + 采样，用命中率验证是否真到平台
   measure_prefill.py            prefill：每请求换 nonce、强制 `reused == 0`、数据取自 /metrics
@@ -195,6 +225,10 @@ results/
   r31-interleaved-session.csv         8 行 · 46K 会话被 3K 插话打断：69.8 s vs 3.2 s
   r32-v148-abba.csv                   6 行 · 0.1.46 vs 0.1.48（含 SPEC_COST 0/1），ABBA，每臂 3 轮
   r33-v148-prefill-68k.csv            4 行 · "prompt path 借用专家槽"那 −2% prefill 的代价
+  r34-host-side-switches.csv          5 臂 · 最后三个旋钮，判据是四分量窗口总和
+  r35-pool-tasks-and-plan.csv         2 臂 · --pool-tasks 64：目标分量 +8.2%
+  r36-pool-exposure.csv               2 臂 · worker 5 → 2：CPU 专家份额有 67% 暴露在关键路径
+  r37-gpu-clock.csv                   2 臂 × 110 采样 · DPM auto vs 强制 high：decode 无变化
 ```
 
 ---
@@ -207,6 +241,9 @@ results/
 - `--prefill-head-alias` 被拒，是**这个配置**（layer split + `short_read`）的组合。
 - 绝对的 tok/s 数字，以及布局搜索选出的 `K`（跨版本已经从 20 漂到 16）。
 - ring 饱和的那个 chunk（本机 20992）——它由 `384 槽 × 层数` 决定，ring 或专家数一变，悬崖就挪位。
+- **DPM 把 decode 当成轻负载**——56% 的采样停在 `sclk` 最低档、43% 停在 `mclk` 最低档。
+  强制 `high` 让高频档时间近三倍，decode 变化是 **−1.4%**。你的卡是否升频值得花 5 分钟查一次，
+  两边都不要假设（`docs/15 §3`）。
 
 **任何 Strata 机器、以及任何在线服务的 A/B 都通用：**
 
@@ -214,6 +251,14 @@ results/
 - **进程年龄是方差的输入，不是常量**——40 h 进程的散布是新进程的 2.7 倍，中位数却一样。
 - 「臂内散布 ≥ 臂间差 ⇒ 噪声」这条判读规则。
 - 用**两个同配置臂实测出的零假设**，而不是从方差估出来的零假设。
+- **重启会抹掉 3% 以下的效应，而"丢掉 5 个请求"救不回来**——本机的爬坡是**十分钟**级的进程效应、
+  值 **3.7 tok/s**，不是五请求级的热身。能在同一进程里 A/B 就别重启；不能，见下一条（`docs/14 §1`）。
+- **窗口分解是一个测量，不是四个**。pool 变快会让 GPU 更早开跑，于是 `wait` 上升把收益吃掉，
+  所以任何单项都会随命中率漂：同一个开关先读出 **−5.1%**、再读出 **+3.0%**。
+  要把 `wait + pool + plan + staging + commit` 加起来，并把**臂内散布写在臂间差旁边**（`docs/14 §2`）。
+- **动手做重叠之前，先确认引擎是不是已经提前发布了**。只看调用点相邻的两行、不去追一层目录下的
+  `pool` 实现，就会凭空造出一个「+18~27%」的立项——而那里有注释写着它已经做了，真实上限 +6~7%
+  （`docs/07 §C14`）。
 - **layer split 会静默把 prefill ring 压成 96**，一个环境变量就能恢复（docs/08）。
 - **前缀缓存是全有或全无**——1,986 token 的小请求和 68K 的大请求一样，都会把 38K 的 checkpoint 清掉（docs/10）。
 - **你的压测 prompt 本身就是那个"插进来的别的 prompt"**，会清掉生产会话的缓存。
@@ -231,9 +276,13 @@ results/
 
 ## 待办
 
-- **64 GB 内存到位后实测**：目前只是从内存账（47,068 MB 物理、RssFile 40 GiB、free 348~844 MB、
-  swap 1.8 GB、命中率 99.87%）**推断**它买的是稳定性而非并发。到货后要重跑会话缓存与崩溃计数才算数。
-- 68K prompt 上复验 `16384 × 384` 拐点（现在只有方向，±15% 噪声）。
+- **prefill 的 28 段从未拆开看过**。tg 那条线已经封死（见 `docs/15` §6），但官方源码自己写着
+  「32K 时 `qsa attn` 占 prompt 的 21%、瓶颈是 instruction issue、只跑到 3.4 TFLOP/s」。
+  跑一次 `STRATA_PREFILL_TIMING=1` 就能定：某段占比 **≥20% 才值得自研 kernel，<10% 直接放弃**。
+  它只影响长 prompt 的首字等待，不影响 tg。
+- **CPU 侧是同一个瓶颈的两种解法，二选一**：换同插槽更强的 CPU（+15~18%，1 天，可回滚）
+  或手写 AVX2 专家 kernel（24.5% → 40%，+3~8%，2~3 周）。两个都做没有意义。
+- 重新学一次 expert profile（预期 1~2%）：流量分布变了，旧的 `learned.bin` 就过时了。
 
 ---
 
