@@ -268,9 +268,15 @@ results/
   but the upstream source itself notes that at 32K `qsa attn` is 21% of the prompt and instruction-issue
   bound at 3.4 TFLOP/s. One run of `STRATA_PREFILL_TIMING=1` settles it: **a segment above 20% justifies
   a custom kernel, below 10% drop the idea.** It affects time-to-first-token on long prompts, not tg.
-- **The CPU side is one bottleneck with two solutions — pick one, not both.** A faster CPU on the same
-  socket (+15–18%, one day, reversible) or a hand-written AVX2 expert kernel (24.5% → 40% of peak,
-  +3–8%, 2–3 weeks).
+- **The CPU side has one solution left, not two.** A faster CPU on the same socket (+15–18%, one day,
+  reversible; Zen3 removes the 256-bit split *and* the CCX boundary, so that is likely a floor). The
+  hand-written AVX2 kernel is **closed** — see [`docs/15 §7`](docs/15-why-decode-stops.md): the old
+  "24.5% of peak" divided an int8 measurement by an FP32 peak, the CPU share is only 14.3% of the
+  window, and every software lever on this ISA is already pulled.
+- **One number would reopen the kernel question**: a CPU-only bench showing IQ2_S/Q2_0 at real byte
+  rates here. Measured is 1.19 GB/s per core; the source comment claims ~5 GB/s for the IQ family.
+  A genuine 4× would mean the ISA, not the kernel, is the whole story — and it would be worth 2–3
+  weeks to find out.
 - Re-learn the expert profile (1–2% expected): the traffic distribution has moved since the current
   `learned.bin` was written.
 

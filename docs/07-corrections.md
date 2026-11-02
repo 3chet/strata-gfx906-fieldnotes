@@ -27,6 +27,7 @@ evidence → what it changes.**
 | C13 | 🟠 medium | The KV cache is 0.47 GiB, so there is nothing to trade for slots | **8.44 GiB** at 160K / `q4_0` / 48 layers. 0.47 was a ~16K-token slice misread as the whole |
 | C14 | 🔴 high | Overlapping the CPU pool with the GPU is untapped and worth **+18–27%** | **Already implemented** (`expert_source.cpp:3720`, plan published before the CPU works). The real ceiling is **+6–7%**, and 67% of the CPU share is structurally exposed |
 | C15 | 🔴 high | End-to-end decode across a restart is the way to A/B a flag; one component of the window is a valid proxy | **Both fail below ~3%.** The restart ramp is worth **3.7 tok/s**, larger than any effect tested; a single component drifts with the hit rate (`−5.1%` then `+3.0%` for one flag). Sum the four components and stay in one process |
+| C16 | 🟠 medium | The CPU expert kernel runs at **24.5% of peak**, so an AVX2 rewrite is worth +3–8% | **Int8 divided by an FP32 peak.** Really **~12%**, on a component that is only **14.3%** of the window. The rewrite is **closed**; the open question is a 4× gap in GB/s per core, not an efficiency ratio |
 
 Plus four gaps that would mislead a careful reader: [§G1](#g1-process-age-is-a-variance-input)
 (process age), [§G2](#g2-cjk-prompt-tokens-per-character), [§G3](#g3-metrics-spec-is-not-argv-spec),
@@ -36,10 +37,11 @@ Plus four gaps that would mislead a careful reader: [§G1](#g1-process-age-is-a-
 C7/C8/C10 — they reverse their verdicts. If you took any configuration advice from this repository
 between 2026-10-19 and 2026-10-22, read those three before anything else.
 
-**C14–C15 come from the 2026-11-02 round on 0.1.55.** C14 was never published here, which is the only
+**C14–C16 come from the 2026-11-02 round on 0.1.55.** C14 was never published here, which is the only
 reason it is filed as a correction rather than an experiment: it was acted on privately first. C15 is a
 methods correction, and it invalidates any decode A/B in this repository that spans a restart and is
-quoted to better than ±8% — including some in `04`.
+quoted to better than ±8% — including some in `04`. C16 withdraws the efficiency figure that `15`
+was built around; it is the only correction here that makes a number *smaller* and a project *dead*.
 
 ---
 
@@ -533,6 +535,45 @@ five-request one, and no amount of discarding inside the first minute fixes it.
 ±8% is suspect; the three in `04` for `--pool-tasks` and `STRATA_POOL_SPIN_US` were re-judged on the
 component sum instead, and both stand as losses for a stronger reason than the original numbers gave.
 New protocol: same process where the flag allows it, four-component sum where it does not.
+
+---
+
+## C16. "Kernel efficiency 24.5% of peak" is withdrawn — it was int8 divided by FP32
+
+**What I wrote.** "The CPU expert kernel runs at 24.5% of peak, so a hand-written AVX2 version could
+reach 40% and buy +3–8%." It was the lead sentence of `15`, the framing of its §6, and one of the two
+recommendations in the README's open items.
+
+**What is true.** Two separate errors, and they point in opposite directions from the conclusion.
+
+| | as written | corrected |
+|---|---|---|
+| numerator | 14.4 GFLOPS measured | unchanged |
+| denominator | **58.7 GFLOPS** — Zen+ *FP32 FMA* peak (3.668 GHz × 16 FLOP/cycle) | **~118 GOPS** — int8, since the path is an integer dot product (32 int8 lanes per 256-bit op) |
+| efficiency | "24.5%" | **~12%** |
+| CPU share of the window | implied large | **7.1 / 50.8 ms = 14.3%** |
+| ceiling if the kernel were infinitely fast | "+3–8%" | **+14%** — and ~+3% for the 1.6× that was actually planned |
+
+So the number was 2× too generous *and* the component it acts on is 7× smaller than the framing
+suggested. Both errors made a closed project look open.
+
+**The measurement that replaced it**, taken from twenty `decode timing` lines on a live process rather
+than a bench — 28 CPU experts per window, 5.6 per worker, **1.27 ms per expert**, **1.19 GB/s per core**.
+Those are the numbers `15 §7` now leads with, because they are absolute and do not depend on any peak
+being correctly identified.
+
+**Why the error happened.** The efficiency percentage was arrived at by dividing the throughput I had by
+the first peak number I could compute, without asking what units the throughput was in. Int8 dot products
+and FP32 FMA are not comparable; on this silicon they differ by 2× before any code quality enters.
+
+**What it changes.** The AVX2 kernel project is closed in `15 §6` and in both READMEs. The one thing that
+would reopen it is a CPU-only bench showing IQ2_S/Q2_0 near the `~5 GB/s per core` the source comment
+claims for the IQ family — measured here is 1.19 GB/s. That gap, not the efficiency ratio, is the honest
+statement of what is unexplained.
+
+**Lesson worth filing separately from the number.** A single scalar "efficiency vs peak" hid two
+decompositions that were both available for free from the instrument already running. Prefer the
+absolute per-unit cost; a ratio invites exactly this class of mistake.
 
 ---
 

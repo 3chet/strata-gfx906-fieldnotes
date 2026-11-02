@@ -1,10 +1,14 @@
-# Why decode stops at ~46: four explanations that do not survive, and the two that do
+# Why decode stops at ~46: four explanations that do not survive, and the one that is left
 
 > **Short version.** The paper number is 200 tok/s and the measured number is 43–48. Four plausible
 > explanations for the gap were tested and all four were wrong — including the one this repository
 > itself was most confident about, "overlap the CPU pool with the GPU", which turned out to be
-> already implemented and worth **+6–7%**, not +18–27%. What is left is one bottleneck with two
-> solutions: **CPU expert-kernel efficiency (24.5% of peak)** and **a faster CPU**.
+> already implemented and worth **+6–7%**, not +18–27%. What is left is one bottleneck: **the CPU's
+> share of the experts is exposed on the critical path, and it runs on six saturated Zen+ cores.**
+>
+> The figure this document used to lead with — *"kernel efficiency 24.5% of peak"* — is withdrawn in
+> [§7](#7-the-cpu-share-measured--and-why-245-was-wrong): it divided an int8 measurement by an FP32
+> peak. The absolute numbers survive and are what to quote: **1.27 ms per expert, 1.19 GB/s per core.**
 >
 > The instrument that settled it is `STRATA_DECODE_TIMING=1`, and the experiment is a single variable:
 > make the CPU side 2.5× slower and see whether the window moves.
@@ -197,20 +201,93 @@ a reopening condition: **≥112 GB RAM** *and* a reason to prefer quality over t
 
 ## 6. What is actually left
 
-One bottleneck, two ways to attack it. Everything here is the same `run` component that §2 shows is
-67% exposed.
+One bottleneck, and after §7 only one way left to attack it. Everything here is the same `run`
+component that §2 shows is 67% exposed.
 
 | | gain | cost | status |
 |---|---|---|---|
-| **CPU with better single-core throughput** (same socket, 1 day) | **+15–18%** | one downtime window, fully reversible | recommended |
-| **Hand-written AVX2 expert kernel** (24.5% → 40% of peak) | **+3–8%** | 2–3 weeks, x86 intrinsics, must pass the quality battery | the alternative, not an addition |
-| Raise CPU clocks / core count on the current socket | 0 | — | 6 cores are already fully occupied, 5 workers + host |
+| **CPU with better single-core throughput** (same socket, 1 day) | **+15–18%, likely more** | one downtime window, fully reversible | **recommended** — the last two-digit move |
+| **Hand-written AVX2 expert kernel** | **~0 headroom found** — see §7 | 2–3 weeks, x86 intrinsics, must pass the quality battery | **closed**, pending one measurement |
+| Raise CPU clocks / core count on the current socket | 0 | — | 6 cores already fully occupied, 5 workers + host |
 | Predict next-layer routing to widen the overlap window | negative | — | measured, `lookahead` |
 
-The 24.5% figure is the one that explains the rest. The CPU share runs the integer dot path, and on
-this microarchitecture a 256-bit integer instruction is split into two 128-bit µops with no AVX-512 and
-no VNNI. That is a code-level ceiling, not a configuration one — which is also why +1.26% from a
-thread-placement flag ([`14`](14-host-side-switches.md)) was the last thing the host side had to give.
+The kernel project is closed on arithmetic, not pessimism. The CPU share is **7.1 ms of a 50.8 ms
+window — 14.3%**. Make the kernel infinitely fast and the end-to-end gain is **+14%**; make it 1.6×
+faster (the old plan, "24.5% → 40% of peak", a peak that was never 24.5%) and the gain is **~+3%**.
+§7 then shows the kernel already sits on the best software path this ISA offers — multi-column dequant
+sharing, gather guard, prefetch and the non-VNNI two-step are all present and live.
+
+What is *not* closed is one unexplained gap: **1.19 GB/s per core measured**, against the
+**~5 GB/s per core** the source's own comment quotes for the IQ family. If that 4× is real and not a
+different-ISA artifact, the kernel story reopens — at a different order of magnitude. §7 names the
+single measurement that decides it.
+
+One caution on the CPU upgrade row, from the same analysis: Zen+ **splits every 256-bit integer op into
+two 128-bit µops** and has no AVX-VNNI. Zen3 does neither, and drops from two CCX to one 32 MB L3. On
+an int8 dot path that is a 2–2.5× class change, not the 19% the IPC number implies — so **+15–18% is
+more likely a floor than a midpoint.**
 
 Raw aggregates: [`results/r36-pool-exposure.csv`](../results/r36-pool-exposure.csv),
 [`results/r37-gpu-clock.csv`](../results/r37-gpu-clock.csv).
+
+## 7. The CPU share, measured — and why 24.5% was wrong
+
+Everything below comes out of the instrument, not a benchmark harness. Twenty `decode timing` lines had
+accumulated on the live process over 51 minutes of ordinary traffic; the last six:
+
+| window tokens | window ms | CPU ms | CPU experts / layer / window | VRAM hits / layer / window | hit rate |
+|---:|---:|---:|---:|---:|---:|
+| 1.96 | 50.81 | 7.27 | 0.59 | 22.66 | 97.5% |
+| 1.73 | 45.26 | 8.29 | 0.67 | 18.70 | 96.5% |
+| 1.78 | 44.82 | 8.00 | 0.64 | 19.36 | 96.8% |
+| 1.78 | 42.69 | 6.58 | 0.53 | 19.32 | 97.3% |
+| 2.00 | 44.41 | 6.43 | 0.52 | 22.40 | 97.7% |
+| 1.76 | 42.52 | 6.62 | 0.54 | 19.49 | 97.3% |
+
+Chaining the columns gives the per-expert cost with no extra instrumentation:
+
+```
+0.58 experts/layer/window × 48 layers   ≈ 28 experts per window
+28 ÷ 5 workers                         ≈ 5.6 experts per worker
+7.1 ms ÷ 5.6                           ≈ 1.27 ms per expert
+9.8 MFLOP × 2 tokens ÷ 1.27 ms         ≈ 15 GFLOPS per core
+1.51 MB ÷ 1.27 ms                      ≈ 1.19 GB/s per core
+```
+
+**The withdrawn number.** "24.5% of peak" divided 14.4 GFLOPS by **58.7** — the Zen+ *FP32 FMA* peak,
+3.668 GHz × 16 FLOP/cycle. But the path being measured is an **int8 dot product**: one 256-bit AVX2
+instruction carries 32 int8 lanes, so the int8 ceiling on the same silicon is roughly twice the FP32
+one (~118 GOPS). Dividing an int8 throughput by an FP32 peak is a units error, and it inflated the
+apparent headroom by about 2×. Correctly stated the figure is **~12%** — still low, but the direction of
+the mistake matters: **it made a closed project look like a 1.6× opportunity.**
+
+The absolute numbers are the durable part. They do not depend on a peak.
+
+**The kernel is already where a kernel can reach on this ISA.** Six checks against the source:
+
+| check | result |
+|---|---|
+| IQ2_S (type 18) has a multi-column AVX2 kernel | yes — `iq256_gu_rows`, type 22 in the support table |
+| Q2_0 (type 42) has one | yes — `q2_rows_any` → `q2_0_gguf_rows_multi_avx2` |
+| fallback without AVX-512 | correct, gated at `cpu_avx512_ok()` |
+| fallback without AVX-VNNI | correct, `maddubs` + `madd` two-step (`iq_avx2.cpp:19` states VNNI is a separate copy) |
+| gather fast path | correctly refused on AMD — `cpu_gather_fast()` tests for `GenuineIntel` first, so this is a designed fallback, not a mis-detection |
+| prefetch | present, `iq_avx2.cpp:193-194` |
+
+Which leaves three ceilings, none of them in the code:
+
+1. **No AVX-512 on Zen+** — every 256-bit integer op is split into two 128-bit µops, halving front-end throughput.
+2. **No AVX-VNNI on Zen+** — an int8 dot product costs `vpmaddubsw` + `vpmaddwd` where one `vpdpbusd` would do.
+3. **IQ2_S is a codebook format** — one grid lookup per 32 weights, and the source comment puts the practical ceiling near `~5 GB/s per core`.
+
+**The gap that is still open.** 1.19 GB/s measured against ~5 GB/s quoted. ISA differences plausibly
+explain 2× of a 4× gap. Three candidates, none tested:
+
+- the ~5 GB/s figure may come from an AVX-512 machine at `nt ≥ 3` — the comment originates on a 14900KF;
+- the prefetch distance may be too short for IQ2_S's 10-byte blocks — 128 B of lookahead covers only ~12 of them;
+- cross-CCX traffic: workers land on cores 1–5, and **cores 3–5 sit in CCX1 while 0–2 sit in CCX0**, so shared weights cross Infinity Fabric.
+
+**What decides it.** A CPU-only bench of IQ2_S/Q2_0 at real byte rates on this box — `kq_cpu_bench
+--pairs iq2_s/q2_0` in the build tree is the intended entry point, run single-threaded against a live
+process that is not decoding. Until that number exists the kernel project stays closed: the software
+path is exhausted, and the remaining ceiling is the instruction set, not the intrinsics.
