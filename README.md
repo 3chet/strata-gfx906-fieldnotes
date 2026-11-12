@@ -24,6 +24,26 @@ nothing**. That ratio is the useful part.
 > 38 came from a harness that rotated six unrelated prompts, i.e. a **cold prefix at 0% reuse**. The
 > same engine on a real conversation decodes **44–48 tok/s**, up to 49. Measured properly, the model
 > upgrade was a net win. See [`docs/12-multiturn-probe.md`](docs/12-multiturn-probe.md).
+>
+> **As of 2026-11-12 there is a canonical config file**:
+> [`configs/production-config-0.1.59.json`](configs/production-config-0.1.59.json), with a
+> walkthrough in [`docs/16`](docs/16-production-config-0.1.59.md). Two more verdicts were reversed
+> (`--aux-cpus auto` removed, `parallel` back to `1`) — see [`C17`](docs/07-corrections.md).
+> **If you want the config, take the JSON, not the October prose.**
+
+---
+
+## 2026-11-12: the config, as it actually runs
+
+| | |
+|---|---|
+| **A real config file** | [`configs/production-config-0.1.59.json`](configs/production-config-0.1.59.json) — the running config with **55 args / 45 env values preserved**, only paths, port and hostname redacted. Walkthrough: [`docs/16`](docs/16-production-config-0.1.59.md) |
+| **Two corrections** | `--aux-cpus auto` **removed** (it hard-pins prefill threads: **~61% prefill loss** on 0.1.59), and `parallel` **back to `1`** (two-stream re-test: 75.13 combined but −13.3% single-stream). Recorded as [`C17`](docs/07-corrections.md) |
+| **Engine** | 0.1.48 → **0.1.59** since the 10-23 notes (v0.2.13 plus 11 local gfx906 patches). Decode **56.2 tok/s** hot, measured ceiling **59.1**; prefill **845** at 71K tokens |
+| **The parameter layer is closed** | No untried flag left above ~1%. What remains is structural: **36% of each decode window is GPU idle** on host-side work, and `wait` alone is 72.6% of 26.80 ms |
+| **What to copy** | The JSON, not the October prose. Machine-specific values (expert slots, the 40 GiB cache budget, `layer_split 26`, the version-bound rocBLAS table) are flagged in [`docs/16 §4`](docs/16-production-config-0.1.59.md) |
+
+Redaction gate `scripts/audit-redaction.ps1 -Strict` re-run before this push.
 
 ---
 
@@ -31,7 +51,7 @@ nothing**. That ratio is the useful part.
 
 | | |
 |---|---|
-| **The last knob** | `--aux-cpus auto` is **+1.26%** and is now in production. It does not make the pool faster — it stops the host thread sharing a core with 8 driver threads. `--pool-tasks 64` and `STRATA_POOL_SPIN_US=50000` are both **slower** |
+| **The last knob** | `--aux-cpus auto` was **+1.26%** and "now in production" — **⚠️ reversed 2026-11-12 (C17): this flag has been removed.** It hard-pins prefill helper threads and later measured a **~61% prefill loss** (519 → 838 tok/s after removal). The original +1.26% was real for that 900-token decode window and did not generalise. See [`docs/16 §5`](docs/16-production-config-0.1.59.md). `--pool-tasks 64` and `STRATA_POOL_SPIN_US=50000` are both **slower** |
 | **A retracted project** | "Overlap the CPU pool with the GPU for +18–27%" — **already implemented** (`expert_source.cpp:3720`), and worth **+6–7%** at most because 67% of the CPU share is structurally exposed. Cancelled, not deferred |
 | **The methods fix** | Two standard instruments cannot resolve 1–3%: decode A/B across a restart (the ramp is **3.7 tok/s**, and a ten-minute effect, not five requests) and any **single** component of the window. Sum all four, stay in one process: reproducible to **0.19–0.57%** |
 | **A negative result on clocks** | Decode runs at the **lowest** DPM state 56% of the time. Forcing `high` locks memory at 1000 MHz and almost triples high-`sclk` residency — decode **46.75 → 46.10**. Not clock-bound either |
@@ -44,6 +64,11 @@ Full write-ups: [`docs/14`](docs/14-host-side-switches.md) (the knobs and the tw
 > 0.1.48 → **0.1.55**, pack IQ3_XXS → **IQ3_S**, RAM 48 → **80 GB**, `parallel: 1` → **`2`**,
 > context → 204800. Those are not written up here. The hardware table below is updated to the current
 > state and the historical tables keep their own version labels — see the version discipline note there.
+>
+> **Update 2026-11-12:** engine is now **0.1.59** and `parallel` is **back to `1`** — the `2` above
+> was reverted. The full running config is published as
+> [`configs/production-config-0.1.59.json`](configs/production-config-0.1.59.json), explained in
+> [`docs/16`](docs/16-production-config-0.1.59.md).
 
 ---
 
@@ -76,7 +101,7 @@ Full write-ups: [`docs/12`](docs/12-multiturn-probe.md) · [`docs/13`](docs/13-e
 | `--mtp-q4 all` | ❌ rejected | Draft layer **grows** 912 → 949 MiB. The Q4 copy is loaded *in addition*, not instead |
 | `--prefill-head-alias` | 🚫 unavailable | Source refuses it here: layer split and `short_read` both disqualify |
 | `--pool-workers` | 🚫 no headroom | 6 physical cores, 5 workers + host already use them all. Above 5 the surplus worker gets `core = -1` and is **silently left unpinned** — not an experiment |
-| **`--aux-cpus auto`** | ✅ **adopted** | **−1.26%** on the four-component window sum, reproducible twice. Moves 27 driver threads off the host core (9 → 1 bound threads); the gain lands in `wait` and `commit`, not in `pool` |
+| **`--aux-cpus auto`** | ⚠️ **reverted 11-12** | The **−1.26%** on the four-component decode window was real on 0.1.55, but on 0.1.59 the flag hard-pins prefill threads and costs **~61% prefill throughput**. Removed — see [`C17`](docs/07-corrections.md) |
 | `--pool-tasks 64` | ❌ rejected | **+8.2%** on `pool + plan`. A task is a **row** (~26,880 per layer), not an expert, so 18 already leaves a one-task tail — finer only multiplies atomic contention |
 | `STRATA_POOL_SPIN_US=50000` | ❌ rejected | +0.62% on top of `--aux-cpus auto`. A spinning worker holds its core; the 20 ms default is right |
 | `--batch 3` | ❌ rejected | Peak concurrency is 2; 3 costs 0.69 GiB and 123 slots |
@@ -180,6 +205,9 @@ docs/
   13-engine-0.1.48.md           ★ upgrading to 0.1.48.1: what it costs, and the 70 s → 3 s payoff
   14-host-side-switches.md      ★ the last three knobs, and the two instruments that were lying
   15-why-decode-stops.md        ★ the ceiling: four explanations that do not survive, two that do
+  16-production-config-0.1.59.md  ★ the config as it actually runs; C17 reverses two 11-02 verdicts
+configs/
+  production-config-0.1.59.json  redacted snapshot: 55 args / 45 env, placeholders for paths + port
 scripts/
   measure_steady.sh             decode: pre-condition + measure, with the hit-rate plateau check
   measure_prefill.py            prefill: nonce per request, `reused == 0` enforced, reads /metrics

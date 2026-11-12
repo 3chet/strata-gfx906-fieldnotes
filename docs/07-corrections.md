@@ -28,6 +28,7 @@ evidence → what it changes.**
 | C14 | 🔴 high | Overlapping the CPU pool with the GPU is untapped and worth **+18–27%** | **Already implemented** (`expert_source.cpp:3720`, plan published before the CPU works). The real ceiling is **+6–7%**, and 67% of the CPU share is structurally exposed |
 | C15 | 🔴 high | End-to-end decode across a restart is the way to A/B a flag; one component of the window is a valid proxy | **Both fail below ~3%.** The restart ramp is worth **3.7 tok/s**, larger than any effect tested; a single component drifts with the hit rate (`−5.1%` then `+3.0%` for one flag). Sum the four components and stay in one process |
 | C16 | 🟠 medium | The CPU expert kernel runs at **24.5% of peak**, so an AVX2 rewrite is worth +3–8% | **Int8 divided by an FP32 peak.** Really **~12%**, on a component that is only **14.3%** of the window. The rewrite is **closed**; the open question is a 4× gap in GB/s per core, not an efficiency ratio |
+| C17 | 🔴 high | `--aux-cpus auto` is +1.26% and in production; `parallel: 2` is the current setting | **Both reverted on 0.1.59.** `--aux-cpus auto` hard-pins prefill threads (**~61% prefill loss**); `parallel` is **1**. Config: [`configs/production-config-0.1.59.json`](../configs/production-config-0.1.59.json) |
 
 Plus four gaps that would mislead a careful reader: [§G1](#g1-process-age-is-a-variance-input)
 (process age), [§G2](#g2-cjk-prompt-tokens-per-character), [§G3](#g3-metrics-spec-is-not-argv-spec),
@@ -42,6 +43,10 @@ reason it is filed as a correction rather than an experiment: it was acted on pr
 methods correction, and it invalidates any decode A/B in this repository that spans a restart and is
 quoted to better than ±8% — including some in `04`. C16 withdraws the efficiency figure that `15`
 was built around; it is the only correction here that makes a number *smaller* and a project *dead*.
+
+**C17 comes from the 2026-11-12 config audit on 0.1.59** and is the reason this repository now ships
+an actual config file. It reverses two verdicts that were both measured correctly *for one workload*
+and then over-generalised. If you copied the 11-02 notes, read C17 and take the JSON instead.
 
 ---
 
@@ -574,6 +579,45 @@ statement of what is unexplained.
 **Lesson worth filing separately from the number.** A single scalar "efficiency vs peak" hid two
 decompositions that were both available for free from the instrument already running. Prefer the
 absolute per-unit cost; a ratio invites exactly this class of mistake.
+
+---
+
+## C17. `--aux-cpus auto` was removed, and `parallel` is 1 again
+
+**What I wrote.** The [2026-11-02 README section](../README.md) says `--aux-cpus auto` is
+"**+1.26%** and is now in production", and the same section's scope note says `parallel: 1 → 2`.
+[`docs/14`](14-host-side-switches.md) opens with "one is 1.26% faster, and it is now in production".
+Both were true of engine **0.1.55**, on the measurement basis stated there: 13 requests × 900
+generated tokens, `parallel: 2`.
+
+**What is true.** On **0.1.59**, neither is in the running config:
+
+1. **`--aux-cpus auto` is gone.** It hard-pins the prefill helper threads (CPU affinity in
+   `prefill.cpp`). A later long-context measurement found prefill **519 → 838 tok/s** after removing
+   it, and time-to-first-token **114.4 → 71.3 s** — roughly a **61%** loss while it was enabled. The
+   original +1.26% was a *decode-window* result; it said nothing about the prefill path. This is the
+   same class of error as C12: a real number from a harness that measures one regime, applied to
+   another.
+2. **`parallel` is `1`.** Three controlled two-stream arms: `p1` **56.59**, `p2 + --batch-mtp`
+   **59.94** (rejected), `p2` without mtp **75.13 combined / 37.56 per stream** at **−13.3%**
+   single-stream. Real traffic is strictly serial. There is a second reason: `parallel: 2` makes the
+   server loader inject `--batch`, which **silently disables `--pipeline-windows 2`** — the log line
+   `is off: not with --batch slots` is the tell.
+
+**Why the error happened.** Two variables moved between the measurement and the audit — the engine
+(0.1.55 → 0.1.59) and the workload (900-token decode windows vs long-context prefill). The 11-02
+round explicitly documented that its instruments cannot resolve 1–3% effects; it did not consider
+that an effect resolved *inside the decode window* could be dwarfed by a cost *outside* it. A version
+label alone was not enough — the regime has to travel with the number.
+
+**What changes.** The flag is absent from
+[`configs/production-config-0.1.59.json`](../configs/production-config-0.1.59.json), which carries
+`parallel: 1`. The 11-02 README text is left as history with an inline pointer, by the convention
+used for C1 and C12. The parameter layer is now **closed**: no untried flag remains above ~1%,
+and the remaining limit is the 36% host-side GPU idle documented in [`docs/16 §6`](16-production-config-0.1.59.md).
+
+**Lesson.** "In production" is a dated claim, not a property of a flag. Publish the config file
+alongside the verdicts, and re-check that the two agree before anyone copies either.
 
 ---
 

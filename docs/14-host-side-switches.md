@@ -11,6 +11,13 @@
 Measurement basis: engine **0.1.55**, IQ3_S pack, `parallel: 2`, `--pool-workers 5`, Ryzen 5 2600
 (6 cores / 12 threads), 80 GB RAM. Every arm below is 13 requests × 900 generated tokens.
 
+> **⚠️ 2026-11-12 correction ([C17](07-corrections.md)).** The 1.26% winner below,
+> `--aux-cpus auto`, is **no longer in production**. Every measurement on this page stands for
+> 0.1.55 and for a 900-token decode window; on 0.1.59 the flag hard-pins prefill helper threads and
+> costs ~61% of prefill, so it was removed. `parallel` is `1` again. For the config the box runs
+> today, use [`configs/production-config-0.1.59.json`](../configs/production-config-0.1.59.json)
+> and [`docs/16`](16-production-config-0.1.59.md).
+
 ---
 
 ## 1. Instrument one: end-to-end decode across a restart

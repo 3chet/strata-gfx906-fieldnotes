@@ -25,6 +25,25 @@
 > "更大的模型只跑 38 tok/s，所以升级亏了 14%"。38 出自一个把六个不相关题目轮流跑的脚本，
 > **前缀是冷的、复用率 0%**。同一个引擎在同一会话里连续追问是 **44~48 tok/s**，最高 49。
 > 用正确的尺子量，这次模型升级是净赚的。见 [`docs/12-multiturn-probe.md`](docs/12-multiturn-probe.md)。
+>
+> **2026-11-12 起有一份权威配置文件**：
+> [`configs/production-config-0.1.59.json`](configs/production-config-0.1.59.json)，说明见
+> [`docs/16`](docs/16-production-config-0.1.59.md)。又有两条结论被推翻（`--aux-cpus auto` 已删、
+> `parallel` 回到 `1`），见 [`C17`](docs/07-corrections.md)。**要抄配置请拿 JSON，不要抄十月的正文。**
+
+---
+
+## 2026-11-12 现役配置，一次给全
+
+| | |
+|---|---|
+| **一份真配置** | [`configs/production-config-0.1.59.json`](configs/production-config-0.1.59.json)——现役配置原样，**55 个 args / 45 个 env 数值全保留**，只把路径、端口、域名换成占位符。逐项说明见 [`docs/16`](docs/16-production-config-0.1.59.md) |
+| **两条纠错** | `--aux-cpus auto` **已删**（硬绑 prefill 线程，在 0.1.59 上 **prefill 掉 ~61%**）；`parallel` **回到 `1`**（双并发重测合计 75.13，但单流 −13.3%）。记为 [`C17`](docs/07-corrections.md) |
+| **引擎** | 相对 10-23 已从 0.1.48 → **0.1.59**（v0.2.13 + 11 个本机 gfx906 补丁）。decode 热态 **56.2 tok/s**、天花板 **59.1**；71K 的 prefill **845** |
+| **参数层已结案** | 没有预期收益 >1% 的未试开关了。剩下的是结构瓶颈：每个 decode 窗口 **36% 的 GPU 空转**在主机侧，`wait` 占 26.80 ms 里的 72.6% |
+| **该抄什么** | 抄 JSON，别抄十月正文。本机专属值（专家槽、40 GiB 缓存预算、`layer_split 26`、绑定版本的 rocBLAS 表）在 [`docs/16 §4`](docs/16-production-config-0.1.59.md) 里逐条标出 |
+
+推送前已重跑脱敏门禁 `scripts/audit-redaction.ps1 -Strict`。
 
 ---
 
@@ -32,7 +51,7 @@
 
 | | |
 |---|---|
-| **最后一个旋钮** | `--aux-cpus auto` 值 **+1.26%**，已进生产。它不让 pool 变快——它让 host 线程不再和 8 个驱动线程挤一个核。`--pool-tasks 64` 与 `STRATA_POOL_SPIN_US=50000` 都**更慢** |
+| **最后一个旋钮** | `--aux-cpus auto` 当时值 **+1.26%**、「已进生产」——**⚠️ 2026-11-12 已推翻（C17）：这个参数已删**。它会硬绑 prefill 辅助线程，后来实测 **prefill 掉 ~61%**（删掉后 519 → 838 tok/s）。原 +1.26% 在 900-token decode 窗口上是真的，只是没能推广到 prefill 路径。见 [`docs/16 §5`](docs/16-production-config-0.1.59.md)。`--pool-tasks 64` 与 `STRATA_POOL_SPIN_US=50000` 都**更慢** |
 | **撤回一个立项** | 「把 CPU pool 与 GPU 做成两段式重叠，值 +18~27%」——**代码里早就做了**（`expert_source.cpp:3720`），而且上限只有 **+6~7%**，因为 CPU 那部分有 67% 结构性暴露。是撤销，不是延期 |
 | **测量方法纠错** | 两个标准手段分辨不了 1~3%：跨重启的 decode A/B（爬坡值 **3.7 tok/s**，且是**十分钟**级不是五请求级）、以及窗口的**任何单项**分量。四分量求和、同进程测：可重现到 **0.19~0.57%** |
 | **一个关于频率的负结果** | decode 有 56% 的采样时间停在 DPM **最低档**。强制 `high` 让显存锁满 1000 MHz、高频档时间近三倍——decode **46.75 → 46.10**。也不受频率限制 |
@@ -44,6 +63,10 @@
 > 说明：10-23 到 11-02 之间还发生了若干变更（引擎 0.1.48 → **0.1.55**、量化 IQ3_XXS → **IQ3_S**、
 > 内存 48 → **80 GB**、并发 `parallel: 1` → **`2`**、ctx → 204800），它们没有单独成文，
 > 下面「硬件与基线」按**现状**更新，历史表保留原版本标注。
+>
+> **2026-11-12 更新**：引擎现为 **0.1.59**，`parallel` **回到 `1`**（上面的 `2` 已回退）。
+> 完整现役配置见 [`configs/production-config-0.1.59.json`](configs/production-config-0.1.59.json)，
+> 说明见 [`docs/16`](docs/16-production-config-0.1.59.md)。
 
 ---
 
@@ -76,7 +99,7 @@
 | `--mtp-q4 all` | ❌ 否决 | draft 层显存 **912 → 949 MiB 反向增加**。Q4 是额外加载，不是替换 |
 | `--prefill-head-alias` | 🚫 不可用 | 源码硬拒绝：layer split 与 `short_read` 两条违例 |
 | `--pool-workers` | 🚫 无余量 | 6 物理核，5 worker + host 已全部占满。超过 5 之后多出来的 worker 拿到 `core = -1` 并**静默不绑核**——那不是实验，是抛硬币 |
-| **`--aux-cpus auto`** | ✅ **采纳** | 四分量窗口总和 **−1.26%**，两次可重现。把 27 个驱动线程移出 host 核（绑定线程 9 → 1）；收益落在 `wait` 与 `commit`，**不在 `pool`** |
+| **`--aux-cpus auto`** | ⚠️ **11-12 回退** | 四分量 decode 窗口的 **−1.26%** 在 0.1.55 上是真的，但在 0.1.59 上它硬绑 prefill 线程、**prefill 掉 ~61%**。已删，见 [`C17`](docs/07-corrections.md) |
 | `--pool-tasks 64` | ❌ 否决 | `pool + plan` **+8.2%**。task 的单位是**行**（每层约 26,880 行）不是专家，18 个已经只剩一个 task 的尾巴——调细只把原子争用放大 3.5 倍 |
 | `STRATA_POOL_SPIN_US=50000` | ❌ 否决 | 叠加在 `--aux-cpus auto` 之上 **+0.62%**。worker 持续自旋会占住核；20 ms 默认值是对的 |
 | `--batch 3` | ❌ 否决 | 峰值并发只有 2；提到 3 占 0.69 GiB、少 123 个槽 |
@@ -201,6 +224,9 @@ docs/
   13-engine-0.1.48.md           ★ 升到 0.1.48.1：代价是什么，以及 70 s → 3 s 的收益
   14-host-side-switches.md      ★ 最后三个主机侧旋钮，以及两个在说谎的仪器
   15-why-decode-stops.md        ★ 天花板：四条不成立的解释，两条成立的
+  16-production-config-0.1.59.md  ★ 现役配置全文；C17 推翻两条 11-02 结论
+configs/
+  production-config-0.1.59.json  脱敏快照：55 args / 45 env，路径与端口为占位符
 scripts/
   measure_steady.sh             decode：预热 + 采样，用命中率验证是否真到平台
   measure_prefill.py            prefill：每请求换 nonce、强制 `reused == 0`、数据取自 /metrics
